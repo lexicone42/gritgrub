@@ -599,6 +599,7 @@ dependencies = [
  "gritgrub-core",
  "gritgrub-store",
  "prost",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",

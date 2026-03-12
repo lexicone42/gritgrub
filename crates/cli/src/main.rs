@@ -157,6 +157,14 @@ enum IdentityAction {
         /// Identity UUID (defaults to active identity)
         id: Option<String>,
     },
+    /// Generate a bearer token for gRPC auth
+    Token {
+        /// Identity UUID (defaults to active identity)
+        id: Option<String>,
+        /// Token expiry in hours (0 = no expiry)
+        #[arg(long, default_value = "24")]
+        expiry_hours: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +255,9 @@ fn main() -> Result<()> {
             IdentityAction::Show { id } => commands::identity::show(&id),
             IdentityAction::Use { id } => commands::identity::activate(&id),
             IdentityAction::Keygen { id } => commands::identity::keygen(id.as_deref()),
+            IdentityAction::Token { id, expiry_hours } => {
+                commands::identity::gen_token(id.as_deref(), expiry_hours)
+            }
         },
         Commands::Agent { action } => match action {
             AgentAction::Write { key, value, file } => {

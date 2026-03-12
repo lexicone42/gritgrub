@@ -5,14 +5,15 @@ use gritgrub_core::*;
 use gritgrub_store::Repository;
 use crate::pb;
 use crate::pb::repo_service_server::RepoService;
+use crate::auth::require_auth;
 
 pub struct RepoServer {
-    repo: Arc<Repository>,
+    pub(crate) repo: Arc<Repository>,
 }
 
 impl RepoServer {
-    pub fn new(repo: Repository) -> Self {
-        Self { repo: Arc::new(repo) }
+    pub fn new(repo: Arc<Repository>) -> Self {
+        Self { repo }
     }
 
     pub fn into_service(self) -> pb::repo_service_server::RepoServiceServer<Self> {
@@ -92,6 +93,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::PutObjectRequest>,
     ) -> Result<Response<pb::PutObjectResponse>, Status> {
+        require_auth(&request)?;
         let req = request.into_inner();
         let obj = match req.object {
             Some(pb::put_object_request::Object::Blob(blob)) => {
@@ -160,6 +162,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::SetRefRequest>,
     ) -> Result<Response<pb::SetRefResponse>, Status> {
+        require_auth(&request)?;
         let req = request.into_inner();
         let reference = match req.value.and_then(|v| v.value) {
             Some(pb::ref_value::Value::Direct(id)) => Ref::Direct(from_pb_object_id(&id)?),
@@ -194,6 +197,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::CreateChangesetRequest>,
     ) -> Result<Response<pb::CreateChangesetResponse>, Status> {
+        let author = require_auth(&request)?;
         let req = request.into_inner();
         let tree = from_pb_object_id(
             req.tree.as_ref().ok_or_else(|| Status::invalid_argument("missing tree"))?
@@ -201,8 +205,6 @@ impl RepoService for RepoServer {
         let parents: Vec<ObjectId> = req.parents.iter()
             .map(|p| from_pb_object_id(p))
             .collect::<Result<Vec<_>, _>>()?;
-
-        let author = self.repo.local_identity().map_err(to_status)?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -272,6 +274,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::CreateIdentityRequest>,
     ) -> Result<Response<pb::CreateIdentityResponse>, Status> {
+        require_auth(&request)?;
         let req = request.into_inner();
         let kind = match pb::IdentityKind::try_from(req.kind) {
             Ok(pb::IdentityKind::Agent) => IdentityKind::Agent { runtime: "unknown".into() },

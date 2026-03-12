@@ -180,7 +180,7 @@ pub struct ResourceDescriptor {
 
 // ── SBOM Attestation ───────────────────────────────────────────────
 
-pub const CYCLONEDX_PREDICATE_V1_6: &str = "https://cyclonedx.org/bom/v1.6";
+pub const CYCLONEDX_PREDICATE: &str = "https://cyclonedx.org/bom";
 
 /// SBOM attestation — references a CycloneDX BOM stored as a blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +205,7 @@ pub enum SbomFormat {
 
 // ── in-toto Link ───────────────────────────────────────────────────
 
-pub const INTOTO_LINK_V0_3: &str = "https://in-toto.io/Link/v0.3";
+pub const INTOTO_LINK_V0_3: &str = "https://in-toto.io/attestation/link/v0.3";
 
 /// in-toto Link — evidence that a supply chain step was performed.
 #[derive(Debug, Clone, Serialize, Deserialize)]

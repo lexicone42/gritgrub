@@ -125,7 +125,7 @@ pub fn list(changeset_prefix: Option<&str>) -> Result<()> {
 
         let pred_name = match statement.predicate_type.as_str() {
             SLSA_PROVENANCE_V1 => "SLSA Provenance v1",
-            CYCLONEDX_PREDICATE_V1_6 => "CycloneDX SBOM",
+            CYCLONEDX_PREDICATE => "CycloneDX SBOM",
             INTOTO_LINK_V0_3 => "in-toto Link",
             REVIEW_PREDICATE_V1 => "Code Review",
             other => other,

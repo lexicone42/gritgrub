@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package gritgrub.v1;
+
+import "gritgrub/v1/objects.proto";
+import "gritgrub/v1/identity.proto";
+
+// ── DSSE Envelope ──────────────────────────────────────────────────
+
+message Envelope {
+  string payload_type = 1;           // "application/vnd.in-toto+json"
+  bytes payload = 2;                 // serialized in-toto Statement (JSON)
+  repeated EnvelopeSignature signatures = 3;
+}
+
+message EnvelopeSignature {
+  IdentityId keyid = 1;             // who signed
+  bytes sig = 2;                     // Ed25519 signature (64 bytes)
+}
+
+// ── Attestation RPCs ───────────────────────────────────────────────
+
+// Attestation operations on the repository.
+// Attestations are DSSE envelopes stored as content-addressed objects
+// and indexed by the changeset they attest to.
+service AttestationService {
+  // Create a signed attestation for a changeset.
+  // Requires authentication — the signer is the authenticated identity.
+  rpc CreateAttestation(CreateAttestationRequest) returns (CreateAttestationResponse);
+
+  // List all attestations for a changeset.
+  rpc ListAttestations(ListAttestationsRequest) returns (ListAttestationsResponse);
+
+  // Verify all attestations for a changeset.
+  rpc VerifyAttestations(VerifyAttestationsRequest) returns (VerifyAttestationsResponse);
+
+  // Check if a changeset meets a SLSA level.
+  rpc CheckSlsaLevel(CheckSlsaLevelRequest) returns (CheckSlsaLevelResponse);
+}
+
+// ── Requests / Responses ───────────────────────────────────────────
+
+message CreateAttestationRequest {
+  ObjectId changeset_id = 1;
+  // The in-toto Statement JSON (will be wrapped in a DSSE envelope
+  // and signed by the authenticated identity).
+  bytes statement_json = 2;
+}
+
+message CreateAttestationResponse {
+  ObjectId envelope_id = 1;
+}
+
+message ListAttestationsRequest {
+  ObjectId changeset_id = 1;
+}
+
+message ListAttestationsResponse {
+  repeated AttestationEntry attestations = 1;
+}
+
+message AttestationEntry {
+  ObjectId envelope_id = 1;
+  Envelope envelope = 2;
+  string predicate_type = 3;  // extracted from the statement for convenience
+}
+
+message VerifyAttestationsRequest {
+  ObjectId changeset_id = 1;
+}
+
+message VerifyAttestationsResponse {
+  repeated SignatureVerification verifications = 1;
+}
+
+message SignatureVerification {
+  ObjectId envelope_id = 1;
+  string predicate_type = 2;
+  IdentityId signer = 3;
+  bool verified = 4;
+  bool key_found = 5;
+}
+
+enum SlsaLevel {
+  SLSA_LEVEL_UNSPECIFIED = 0;
+  SLSA_LEVEL_L0 = 1;
+  SLSA_LEVEL_L1 = 2;
+  SLSA_LEVEL_L2 = 3;
+  SLSA_LEVEL_L3 = 4;
+}
+
+message CheckSlsaLevelRequest {
+  ObjectId changeset_id = 1;
+  SlsaLevel required_level = 2;
+}
+
+message CheckSlsaLevelResponse {
+  bool meets_level = 1;
+  SlsaLevel actual_level = 2;
+}

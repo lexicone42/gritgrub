@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "../../proto/gritgrub/v1/identity.proto",
                 "../../proto/gritgrub/v1/repo.proto",
                 "../../proto/gritgrub/v1/events.proto",
+                "../../proto/gritgrub/v1/attestation.proto",
             ],
             &["../../proto"],
         )?;

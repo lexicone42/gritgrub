@@ -9,4 +9,11 @@ pub mod proto {
 pub use proto::gritgrub::v1 as pb;
 
 mod server;
+mod auth;
+mod attestation_service;
+mod event_service;
+
 pub use server::RepoServer;
+pub use auth::{auth_interceptor, require_auth, optional_auth, AuthenticatedIdentity};
+pub use attestation_service::AttestationServer;
+pub use event_service::EventServer;

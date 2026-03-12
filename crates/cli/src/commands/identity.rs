@@ -71,6 +71,43 @@ pub fn show(id_str: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn gen_token(id_str: Option<&str>, expiry_hours: u64) -> Result<()> {
+    let repo = Repository::discover(&std::env::current_dir()?)?;
+
+    let id = match id_str {
+        Some(s) => {
+            let uuid = uuid::Uuid::parse_str(s)
+                .map_err(|e| anyhow::anyhow!("invalid UUID: {}", e))?;
+            IdentityId(uuid)
+        }
+        None => repo.local_identity()?,
+    };
+
+    let kp = repo.load_keypair(&id)?;
+
+    let expiry_micros = if expiry_hours == 0 {
+        0 // non-expiring
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        now + (expiry_hours as i64 * 3_600_000_000)
+    };
+
+    let token = gritgrub_core::generate_token(id, &kp.signing_key, expiry_micros);
+
+    if expiry_hours == 0 {
+        eprintln!("Generated non-expiring token for {}", id);
+    } else {
+        eprintln!("Generated token for {} (expires in {}h)", id, expiry_hours);
+    }
+    // Print only the token to stdout so it can be captured: `TOKEN=$(forge identity token)`
+    println!("{}", token);
+
+    Ok(())
+}
+
 pub fn keygen(id_str: Option<&str>) -> Result<()> {
     let repo = Repository::discover(&std::env::current_dir()?)?;
 

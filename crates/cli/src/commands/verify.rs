@@ -22,7 +22,7 @@ pub fn run(changeset_prefix: Option<&str>, slsa_level: Option<&str>) -> Result<(
     for r in &results {
         let pred_name = match r.predicate_type.as_str() {
             SLSA_PROVENANCE_V1 => "SLSA Provenance",
-            CYCLONEDX_PREDICATE_V1_6 => "CycloneDX SBOM",
+            CYCLONEDX_PREDICATE => "CycloneDX SBOM",
             INTOTO_LINK_V0_3 => "in-toto Link",
             REVIEW_PREDICATE_V1 => "Code Review",
             other => other,

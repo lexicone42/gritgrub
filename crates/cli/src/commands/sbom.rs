@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use gritgrub_core::*;
-use gritgrub_core::attestation::*;
 use gritgrub_store::Repository;
 
 /// Generate an SBOM from Cargo.lock and attach as an attestation to HEAD.
@@ -49,7 +48,7 @@ pub fn generate(changeset_prefix: Option<&str>) -> Result<()> {
     let tree_subject = Subject::from_object_id("tree", &_cs.tree);
     let statement = Statement::new(
         vec![subject, tree_subject],
-        CYCLONEDX_PREDICATE_V1_6,
+        CYCLONEDX_PREDICATE,
         Predicate::Sbom(sbom_att),
     );
 
@@ -73,7 +72,7 @@ pub fn show(changeset_prefix: Option<&str>) -> Result<()> {
 
     let sbom_env = envelopes.iter().find(|(_, env)| {
         serde_json::from_slice::<Statement>(&env.payload)
-            .map(|s| s.predicate_type == CYCLONEDX_PREDICATE_V1_6)
+            .map(|s| s.predicate_type == CYCLONEDX_PREDICATE)
             .unwrap_or(false)
     });
 
