@@ -7,3 +7,6 @@ pub mod cat;
 pub mod diff;
 pub mod show;
 pub mod branch;
+pub mod checkout;
+pub mod identity;
+pub mod agent;

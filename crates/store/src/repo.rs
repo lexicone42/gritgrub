@@ -81,7 +81,7 @@ impl Repository {
         self.backend.set_config(key, value)
     }
 
-    /// Get the local identity for this repository.
+    /// Get the active identity for this repository.
     pub fn local_identity(&self) -> Result<IdentityId> {
         if let Some(id_str) = self.backend.get_config("identity.id")? {
             let uuid = uuid::Uuid::parse_str(&id_str)?;
@@ -90,6 +90,35 @@ impl Repository {
         let id = IdentityId::new();
         self.backend.set_config("identity.id", &id.0.to_string())?;
         Ok(id)
+    }
+
+    /// Set the active identity for commits.
+    pub fn set_active_identity(&self, id: &IdentityId) -> Result<()> {
+        self.backend.set_config("identity.id", &id.0.to_string())
+    }
+
+    // ── Identities ──────────────────────────────────────────────────
+
+    pub fn create_identity(&self, name: &str, kind: IdentityKind) -> Result<Identity> {
+        let identity = Identity {
+            id: IdentityId::new(),
+            kind,
+            name: name.to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64,
+        };
+        self.backend.put_identity(&identity)?;
+        Ok(identity)
+    }
+
+    pub fn get_identity(&self, id: &IdentityId) -> Result<Option<Identity>> {
+        self.backend.get_identity(id)
+    }
+
+    pub fn list_identities(&self) -> Result<Vec<Identity>> {
+        self.backend.list_identities()
     }
 
     // ── Refs ────────────────────────────────────────────────────────
@@ -265,6 +294,79 @@ impl Repository {
         let mut result = StatusResult::default();
         self.diff_tree(&self.root, head_tree.as_ref(), &mut result, String::new())?;
         Ok(result)
+    }
+
+    /// Restore the working directory to match a tree object.
+    /// Requires a clean working tree (no uncommitted changes).
+    pub fn checkout_tree(&self, tree_id: &ObjectId) -> Result<()> {
+        let status = self.status()?;
+        if !status.is_clean() {
+            bail!(
+                "working tree has uncommitted changes ({} added, {} modified, {} deleted)",
+                status.added.len(),
+                status.modified.len(),
+                status.deleted.len(),
+            );
+        }
+        self.clean_working_dir()?;
+        self.write_tree(tree_id, &self.root)
+    }
+
+    /// Delete all non-ignored files in the working directory.
+    fn clean_working_dir(&self) -> Result<()> {
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if self.should_ignore(&name, &self.root) {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a tree object to a directory on disk.
+    fn write_tree(&self, tree_id: &ObjectId, dir: &Path) -> Result<()> {
+        let tree = match self.get_object(tree_id)? {
+            Some(Object::Tree(t)) => t,
+            _ => bail!("expected tree object: {}", tree_id),
+        };
+
+        for (name, entry) in &tree.entries {
+            let path = dir.join(name);
+            match entry.kind {
+                EntryKind::File => {
+                    if let Some(Object::Blob(blob)) = self.get_object(&entry.id)? {
+                        std::fs::write(&path, &blob.data)?;
+                        #[cfg(unix)]
+                        if entry.executable {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+                        }
+                    }
+                }
+                EntryKind::Directory => {
+                    std::fs::create_dir_all(&path)?;
+                    self.write_tree(&entry.id, &path)?;
+                }
+                EntryKind::Symlink => {
+                    if let Some(Object::Blob(blob)) = self.get_object(&entry.id)? {
+                        #[cfg(unix)]
+                        {
+                            let target = String::from_utf8_lossy(&blob.data);
+                            std::os::unix::fs::symlink(target.as_ref(), &path)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // ── Internals ───────────────────────────────────────────────────

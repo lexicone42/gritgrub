@@ -1,12 +1,13 @@
 use std::path::Path;
 use anyhow::Result;
 use redb::{Database, TableDefinition, ReadableTable};
-use gritgrub_core::{ObjectId, Object, Ref};
+use gritgrub_core::{ObjectId, Object, Ref, Identity, IdentityId};
 use crate::backend::{ObjectStore, RefStore};
 
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
 const CONFIG: TableDefinition<&str, &str> = TableDefinition::new("config");
+const IDENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identities");
 
 pub struct RedbBackend {
     db: Database,
@@ -21,6 +22,7 @@ impl RedbBackend {
             tx.open_table(OBJECTS)?;
             tx.open_table(REFS)?;
             tx.open_table(CONFIG)?;
+            tx.open_table(IDENTITIES)?;
         }
         tx.commit()?;
         Ok(Self { db })
@@ -56,6 +58,53 @@ impl RedbBackend {
 }
 
 impl RedbBackend {
+    // ── Identity storage ────────────────────────────────────────────
+
+    pub fn put_identity(&self, identity: &Identity) -> Result<()> {
+        let bytes = postcard::to_allocvec(identity)?;
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(IDENTITIES)?;
+            table.insert(identity.id.as_bytes().as_slice(), bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_identity(&self, id: &IdentityId) -> Result<Option<Identity>> {
+        let tx = self.db.begin_read()?;
+        let table = match tx.open_table(IDENTITIES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        match table.get(id.as_bytes().as_slice())? {
+            Some(data) => {
+                let ident: Identity = postcard::from_bytes(data.value())?;
+                Ok(Some(ident))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_identities(&self) -> Result<Vec<Identity>> {
+        let tx = self.db.begin_read()?;
+        let table = match tx.open_table(IDENTITIES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut identities = Vec::new();
+        for entry in table.iter()? {
+            let (_key, value) = entry?;
+            let ident: Identity = postcard::from_bytes(value.value())?;
+            identities.push(ident);
+        }
+        Ok(identities)
+    }
+
+    // ── Object prefix search ────────────────────────────────────────
+
     /// Find objects whose hex ID starts with `hex_prefix`.
     pub fn find_objects_by_prefix(&self, hex_prefix: &str) -> Result<Vec<(ObjectId, Object)>> {
         let tx = self.db.begin_read()?;

@@ -49,7 +49,7 @@ enum Commands {
 
     /// Inspect a stored object
     Cat {
-        /// Object ID (hex prefix, at least 8 chars)
+        /// Object ID (hex prefix)
         id: String,
     },
 
@@ -72,6 +72,76 @@ enum Commands {
         /// Branch name to create (omit to list)
         name: Option<String>,
     },
+
+    /// Switch branches or detach HEAD at a changeset
+    Checkout {
+        /// Branch name or changeset ID prefix
+        target: String,
+        /// Create a new branch and switch to it
+        #[arg(short = 'b')]
+        create: bool,
+    },
+
+    /// Manage identities (humans and agents)
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
+
+    /// Agent scratchpad — persistent working context
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityAction {
+    /// List all identities
+    List,
+    /// Create a new identity
+    Create {
+        /// Display name
+        #[arg(long)]
+        name: String,
+        /// Kind: human or agent
+        #[arg(long, default_value = "human")]
+        kind: String,
+        /// Agent runtime (e.g., claude-code, custom-bot)
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    /// Show identity details
+    Show {
+        /// Identity UUID
+        id: String,
+    },
+    /// Set as the active identity for commits
+    Use {
+        /// Identity UUID
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Write a scratchpad entry
+    Write {
+        /// Key name
+        key: String,
+        /// Value (or use --file, or pipe via stdin)
+        value: Option<String>,
+        /// Read value from file
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Read a scratchpad entry
+    Read {
+        /// Key name
+        key: String,
+    },
+    /// List all scratchpad entries
+    List,
 }
 
 fn main() -> Result<()> {
@@ -91,5 +161,23 @@ fn main() -> Result<()> {
         }
         Commands::Show { id } => commands::show::run(id.as_deref()),
         Commands::Branch { name } => commands::branch::run(name.as_deref()),
+        Commands::Checkout { target, create } => {
+            commands::checkout::run(&target, create)
+        }
+        Commands::Identity { action } => match action {
+            IdentityAction::List => commands::identity::list(),
+            IdentityAction::Create { name, kind, runtime } => {
+                commands::identity::create(&name, &kind, runtime.as_deref())
+            }
+            IdentityAction::Show { id } => commands::identity::show(&id),
+            IdentityAction::Use { id } => commands::identity::activate(&id),
+        },
+        Commands::Agent { action } => match action {
+            AgentAction::Write { key, value, file } => {
+                commands::agent::write(&key, value.as_deref(), file.as_deref())
+            }
+            AgentAction::Read { key } => commands::agent::read(&key),
+            AgentAction::List => commands::agent::list(),
+        },
     }
 }

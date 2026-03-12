@@ -9,5 +9,5 @@ pub use id::{ObjectId, IdError};
 pub use object::{Object, Blob, ObjectError};
 pub use tree::{Tree, TreeEntry, EntryKind};
 pub use changeset::{Changeset, Intent, IntentKind, Verification, VerificationKind, VerificationStatus};
-pub use identity::{IdentityId, IdentityKind};
+pub use identity::{IdentityId, IdentityKind, Identity, Capability, CapabilityScope, Permissions};
 pub use refs::Ref;
