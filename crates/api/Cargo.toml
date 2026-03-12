@@ -8,10 +8,15 @@ gritgrub-core = { workspace = true }
 gritgrub-store = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 anyhow = { workspace = true }
 tokio-stream = "0.1"
 serde_json = { workspace = true }
+serde = { workspace = true }
+toml = "0.8"
+tonic-health = "0.12"
+tonic-reflection = "0.12"
+tonic-web = "0.12"
 
 [build-dependencies]
 tonic-build = "0.12"

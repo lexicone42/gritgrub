@@ -98,10 +98,11 @@ impl Permissions {
         Self(Self::READ)
     }
 
-    pub fn can_read(&self) -> bool { self.0 & Self::READ != 0 }
-    pub fn can_write(&self) -> bool { self.0 & Self::WRITE != 0 }
-    pub fn can_create(&self) -> bool { self.0 & Self::CREATE != 0 }
-    pub fn can_delete(&self) -> bool { self.0 & Self::DELETE != 0 }
+    // SE-23: ADMIN implies all other permissions — checking admin first.
+    pub fn can_read(&self) -> bool { self.is_admin() || self.0 & Self::READ != 0 }
+    pub fn can_write(&self) -> bool { self.is_admin() || self.0 & Self::WRITE != 0 }
+    pub fn can_create(&self) -> bool { self.is_admin() || self.0 & Self::CREATE != 0 }
+    pub fn can_delete(&self) -> bool { self.is_admin() || self.0 & Self::DELETE != 0 }
     pub fn is_admin(&self) -> bool { self.0 & Self::ADMIN != 0 }
 }
 

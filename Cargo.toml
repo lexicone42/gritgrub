@@ -6,6 +6,9 @@ members = [
     "crates/api",
     "crates/cli",
 ]
+exclude = [
+    "crates/core/fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -26,6 +29,6 @@ chrono = "0.4"
 anyhow = "1"
 thiserror = "2"
 prost = "0.13"
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 serde_json = "1"

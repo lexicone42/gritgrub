@@ -5,7 +5,7 @@ use gritgrub_core::*;
 use gritgrub_store::Repository;
 use crate::pb;
 use crate::pb::repo_service_server::RepoService;
-use crate::auth::require_auth;
+use crate::auth::{require_scope, require_auth_with_scopes};
 
 pub struct RepoServer {
     pub(crate) repo: Arc<Repository>,
@@ -93,7 +93,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::PutObjectRequest>,
     ) -> Result<Response<pb::PutObjectResponse>, Status> {
-        require_auth(&request)?;
+        require_scope(&request, |s| s.allows_write(), "write")?;
         let req = request.into_inner();
         let obj = match req.object {
             Some(pb::put_object_request::Object::Blob(blob)) => {
@@ -162,13 +162,50 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::SetRefRequest>,
     ) -> Result<Response<pb::SetRefResponse>, Status> {
-        require_auth(&request)?;
+        // Extract auth before consuming request.
+        let auth = require_auth_with_scopes(&request)?.clone();
+        if !auth.scopes.allows_write() {
+            return Err(Status::permission_denied(
+                "token lacks required scope 'write' — generate a new token with this scope"
+            ));
+        }
+
         let req = request.into_inner();
+
+        // Check ref-specific scope.
+        if !auth.scopes.allows_ref(&req.name) {
+            return Err(Status::permission_denied(format!(
+                "token lacks scope for ref '{}' — add ref:{} scope to token",
+                req.name, req.name
+            )));
+        }
+
         let reference = match req.value.and_then(|v| v.value) {
             Some(pb::ref_value::Value::Direct(id)) => Ref::Direct(from_pb_object_id(&id)?),
             Some(pb::ref_value::Value::Symbolic(target)) => Ref::Symbolic(target),
             None => return Err(Status::invalid_argument("missing ref value")),
         };
+
+        // SE-7: Enforce ref policies.
+        let target_id = match &reference {
+            Ref::Direct(id) => Some(id),
+            Ref::Symbolic(_) => None,
+        };
+        // Determine if this is a force push (non-fast-forward).
+        let is_force = if let Some(new_id) = target_id {
+            match self.repo.resolve_ref(&req.name).map_err(to_status)? {
+                Some(old_id) => old_id != *new_id, // simplified; proper FF check needs ancestor walk
+                None => false, // new ref, not a force push
+            }
+        } else {
+            false
+        };
+        if let Some(denial) = self.repo.check_ref_policy(
+            &req.name, &auth.identity, target_id, is_force
+        ).map_err(to_status)? {
+            return Err(Status::permission_denied(denial.to_string()));
+        }
+
         self.repo.set_ref(&req.name, &reference).map_err(to_status)?;
         Ok(Response::new(pb::SetRefResponse {}))
     }
@@ -197,7 +234,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::CreateChangesetRequest>,
     ) -> Result<Response<pb::CreateChangesetResponse>, Status> {
-        let author = require_auth(&request)?;
+        let author = require_scope(&request, |s| s.allows_write(), "write")?;
         let req = request.into_inner();
         let tree = from_pb_object_id(
             req.tree.as_ref().ok_or_else(|| Status::invalid_argument("missing tree"))?
@@ -274,7 +311,7 @@ impl RepoService for RepoServer {
         &self,
         request: Request<pb::CreateIdentityRequest>,
     ) -> Result<Response<pb::CreateIdentityResponse>, Status> {
-        require_auth(&request)?;
+        require_scope(&request, |s| s.allows_identity(), "identity")?;
         let req = request.into_inner();
         let kind = match pb::IdentityKind::try_from(req.kind) {
             Ok(pb::IdentityKind::Agent) => IdentityKind::Agent { runtime: "unknown".into() },

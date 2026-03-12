@@ -16,5 +16,5 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 gritgrub-api = { path = "../api" }
 tonic = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 serde_json = { workspace = true }

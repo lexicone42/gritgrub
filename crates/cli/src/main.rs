@@ -120,9 +120,15 @@ enum Commands {
 
     /// Start the gRPC server
     Serve {
-        /// Address to listen on
-        #[arg(long, default_value = "[::1]:50051")]
-        addr: String,
+        /// Override gRPC listen address
+        #[arg(long)]
+        addr: Option<String>,
+        /// Path to server config TOML (default: .forge/server.toml)
+        #[arg(long)]
+        config: Option<String>,
+        /// Write a default config file and exit
+        #[arg(long)]
+        init_config: bool,
     },
 }
 
@@ -164,6 +170,30 @@ enum IdentityAction {
         /// Token expiry in hours (0 = no expiry)
         #[arg(long, default_value = "24")]
         expiry_hours: u64,
+        /// Comma-separated scopes (default: * = admin). Options: read, write, attest, identity, ref:<pattern>
+        #[arg(long, default_value = "*")]
+        scope: String,
+    },
+    /// Grant capabilities to an identity
+    Grant {
+        /// Identity UUID
+        id: String,
+        /// Permission scope: global, read, write, admin
+        #[arg(long, default_value = "global")]
+        scope: String,
+        /// Permission level: r, rw, rwcd, admin
+        #[arg(long, default_value = "rw")]
+        permissions: String,
+    },
+    /// Show capabilities for an identity
+    Capabilities {
+        /// Identity UUID (defaults to active identity)
+        id: Option<String>,
+    },
+    /// Revoke a bearer token
+    Revoke {
+        /// Token to revoke (or pipe via stdin)
+        token: String,
     },
 }
 
@@ -255,8 +285,17 @@ fn main() -> Result<()> {
             IdentityAction::Show { id } => commands::identity::show(&id),
             IdentityAction::Use { id } => commands::identity::activate(&id),
             IdentityAction::Keygen { id } => commands::identity::keygen(id.as_deref()),
-            IdentityAction::Token { id, expiry_hours } => {
-                commands::identity::gen_token(id.as_deref(), expiry_hours)
+            IdentityAction::Token { id, expiry_hours, scope } => {
+                commands::identity::gen_token(id.as_deref(), expiry_hours, &scope)
+            }
+            IdentityAction::Grant { id, scope, permissions } => {
+                commands::identity::grant(&id, &scope, &permissions)
+            }
+            IdentityAction::Capabilities { id } => {
+                commands::identity::capabilities(id.as_deref())
+            }
+            IdentityAction::Revoke { token } => {
+                commands::identity::revoke_token(&token)
             }
         },
         Commands::Agent { action } => match action {
@@ -285,6 +324,8 @@ fn main() -> Result<()> {
         Commands::Verify { id, slsa } => {
             commands::verify::run(id.as_deref(), slsa.as_deref())
         }
-        Commands::Serve { addr } => commands::serve::run(&addr),
+        Commands::Serve { addr, config, init_config } => {
+            commands::serve::run(addr.as_deref(), config.as_deref(), init_config)
+        }
     }
 }

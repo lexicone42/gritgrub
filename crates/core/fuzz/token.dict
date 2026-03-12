@@ -1,0 +1,33 @@
+# Token format keywords
+"forge-v1:"
+"forge-v2:"
+"forge-v1"
+"forge-v2"
+":"
+","
+
+# Scope strings
+"*"
+"read"
+"write"
+"attest"
+"identity"
+"ref:"
+
+# Ref patterns
+"refs/heads/"
+"refs/tags/"
+"refs/keys/"
+
+# UUID-like
+"00000000-0000-0000-0000-000000000000"
+"ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+# Expiry
+"0000000000000000"
+"ffffffffffffffff"
+
+# Hex chars (signature building blocks)
+"0"
+"a"
+"f"

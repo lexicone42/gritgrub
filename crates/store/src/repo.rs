@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use gritgrub_core::*;
 use gritgrub_core::attestation::*;
-use crate::backend::{ObjectStore, RefStore};
+use crate::backend::{ObjectStore, RefStore, ConfigStore, IdentityStore, EventStore, RevocationStore};
 use crate::redb_backend::RedbBackend;
 
 const FORGE_DIR: &str = ".forge";
@@ -30,16 +30,27 @@ impl Repository {
         // HEAD starts as a symbolic ref to the default branch.
         backend.set_ref("HEAD", &Ref::Symbolic("refs/heads/main".into()))?;
 
-        // Generate a local identity.
-        let id = IdentityId::new();
-        backend.set_config("identity.id", &id.0.to_string())?;
-
         let name = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "anonymous".to_string());
-        backend.set_config("identity.name", &name)?;
 
-        Ok(Self { root, backend })
+        let repo = Self { root, backend };
+
+        // SE-5: Create the initial identity WITH admin capabilities.
+        let identity = repo.create_identity_with_capabilities(
+            &name,
+            IdentityKind::Human,
+            vec![Capability {
+                scope: CapabilityScope::Global,
+                permissions: Permissions::all(),
+                expires_at: None,
+            }],
+        )?;
+
+        repo.backend.set_config("identity.id", &identity.id.0.to_string())?;
+        repo.backend.set_config("identity.name", &name)?;
+
+        Ok(repo)
     }
 
     /// Open an existing repository at `path`.
@@ -111,6 +122,21 @@ impl Repository {
                 .as_micros() as i64,
         };
         self.backend.put_identity(&identity)?;
+
+        // New identities get no capabilities by default.
+        // The repo owner must explicitly grant access.
+        Ok(identity)
+    }
+
+    /// Create an identity with initial capabilities (used by init for the owner).
+    pub fn create_identity_with_capabilities(
+        &self,
+        name: &str,
+        kind: IdentityKind,
+        capabilities: Vec<Capability>,
+    ) -> Result<Identity> {
+        let identity = self.create_identity(name, kind)?;
+        self.backend.set_capabilities(&identity.id, &capabilities)?;
         Ok(identity)
     }
 
@@ -381,11 +407,16 @@ impl Repository {
     pub fn generate_keypair(&self, identity: &IdentityId) -> Result<IdentityKeyPair> {
         let kp = IdentityKeyPair::generate(*identity);
 
-        // Store secret key locally.
+        // Store secret key locally with restricted permissions (SE-18).
         let keys_dir = self.keys_dir();
         std::fs::create_dir_all(&keys_dir)?;
         let secret_path = keys_dir.join(format!("{}.secret", identity));
         std::fs::write(&secret_path, kp.secret_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         // Store public key as a ref (so it can sync to remotes).
         let public_blob = Object::Blob(Blob { data: kp.public_bytes().to_vec() });
@@ -551,6 +582,169 @@ impl Repository {
 
         // L3: would require hermetic build verification — not yet implemented.
         Ok(false)
+    }
+
+    // ── Capabilities ────────────────────────────────────────────────
+
+    /// Grant capabilities to an identity (appends to existing).
+    pub fn grant_capabilities(&self, id: &IdentityId, new_caps: &[Capability]) -> Result<()> {
+        let mut caps = self.backend.get_capabilities(id)?;
+        caps.extend_from_slice(new_caps);
+        self.backend.set_capabilities(id, &caps)
+    }
+
+    /// Replace all capabilities for an identity.
+    pub fn set_capabilities(&self, id: &IdentityId, caps: &[Capability]) -> Result<()> {
+        self.backend.set_capabilities(id, caps)
+    }
+
+    /// Get capabilities for an identity.
+    pub fn get_capabilities(&self, id: &IdentityId) -> Result<Vec<Capability>> {
+        self.backend.get_capabilities(id)
+    }
+
+    /// Check if an identity has a specific permission for a scope.
+    pub fn check_permission(
+        &self,
+        id: &IdentityId,
+        required_scope: &CapabilityScope,
+        required_perm: u32,
+    ) -> Result<bool> {
+        let caps = self.backend.get_capabilities(id)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        for cap in &caps {
+            // Skip expired capabilities.
+            if let Some(exp) = cap.expires_at {
+                if now > exp {
+                    continue;
+                }
+            }
+            // Check if scope matches.
+            if scope_covers(&cap.scope, required_scope) && (cap.permissions.0 & required_perm != 0) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    // ── Ref policies ──────────────────────────────────────────────
+
+    /// Load ref policies from config.
+    pub fn get_ref_policies(&self) -> Result<Vec<RefPolicy>> {
+        match self.backend.get_config("ref_policies")? {
+            Some(json) => Ok(serde_json::from_str(&json)?),
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Save ref policies to config.
+    pub fn set_ref_policies(&self, policies: &[RefPolicy]) -> Result<()> {
+        let json = serde_json::to_string(policies)?;
+        self.backend.set_config("ref_policies", &json)
+    }
+
+    /// Check if a ref update is allowed by policies.
+    /// Returns Ok(None) if allowed, Ok(Some(denial)) if denied.
+    pub fn check_ref_policy(
+        &self,
+        ref_name: &str,
+        identity: &IdentityId,
+        target_changeset: Option<&ObjectId>,
+        is_force_push: bool,
+    ) -> Result<Option<PolicyDenial>> {
+        let policies = self.get_ref_policies()?;
+
+        for policy in &policies {
+            if !policy.matches(ref_name) {
+                continue;
+            }
+
+            // SE-4: Check force push restriction.
+            if is_force_push && policy.forbid_force_push {
+                return Ok(Some(PolicyDenial::ForcePushForbidden {
+                    policy_pattern: policy.pattern.clone(),
+                }));
+            }
+
+            // Check allowed writers.
+            if !policy.allowed_writers.is_empty()
+                && !policy.allowed_writers.contains(identity)
+            {
+                return Ok(Some(PolicyDenial::NotAllowedWriter {
+                    policy_pattern: policy.pattern.clone(),
+                    identity: *identity,
+                }));
+            }
+
+            // Check attestation requirements on the target changeset.
+            if let Some(cs_id) = target_changeset {
+                if policy.require_review {
+                    let verifications = self.verify_attestations(cs_id)?;
+                    let has_review = verifications.iter().any(|v| {
+                        v.verified && v.predicate_type == REVIEW_PREDICATE_V1
+                    });
+                    if !has_review {
+                        return Ok(Some(PolicyDenial::MissingReview {
+                            policy_pattern: policy.pattern.clone(),
+                        }));
+                    }
+                }
+
+                if let Some(required_slsa) = policy.require_slsa {
+                    if !self.check_slsa_level(cs_id, required_slsa)? {
+                        let actual = if self.check_slsa_level(cs_id, SlsaLevel::L2)? {
+                            SlsaLevel::L2
+                        } else if self.check_slsa_level(cs_id, SlsaLevel::L1)? {
+                            SlsaLevel::L1
+                        } else {
+                            SlsaLevel::L0
+                        };
+                        return Ok(Some(PolicyDenial::InsufficientSlsa {
+                            policy_pattern: policy.pattern.clone(),
+                            required: required_slsa,
+                            actual,
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(None) // No policy denied the update.
+    }
+
+    // ── Events ──────────────────────────────────────────────────────
+
+    /// Append a structured event to the persistent log.
+    pub fn log_event(&self, event: &[u8]) -> Result<u64> {
+        self.backend.append_event(event)
+    }
+
+    /// Read events from a sequence number (for replay / catch-up).
+    pub fn read_events(&self, from_seq: u64, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        self.backend.read_events(from_seq, limit)
+    }
+
+    /// Get the latest event sequence number.
+    pub fn latest_event_seq(&self) -> Result<u64> {
+        self.backend.latest_event_seq()
+    }
+
+    // ── Token revocation ────────────────────────────────────────────
+
+    /// Revoke a token by its BLAKE3 hash.
+    pub fn revoke_token(&self, token: &str) -> Result<()> {
+        let hash = blake3::hash(token.as_bytes());
+        self.backend.revoke_token(hash.as_bytes().try_into().unwrap())
+    }
+
+    /// Check if a token is revoked.
+    pub fn is_token_revoked(&self, token: &str) -> Result<bool> {
+        let hash = blake3::hash(token.as_bytes());
+        self.backend.is_token_revoked(hash.as_bytes().try_into().unwrap())
     }
 
     // ── Internals ───────────────────────────────────────────────────
@@ -748,5 +942,30 @@ pub struct StatusResult {
 impl StatusResult {
     pub fn is_clean(&self) -> bool {
         self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+}
+
+/// Check if a granted capability scope covers a required scope.
+fn scope_covers(granted: &CapabilityScope, required: &CapabilityScope) -> bool {
+    match granted {
+        CapabilityScope::Global => true, // Global covers everything.
+        CapabilityScope::Repository(granted_repo) => match required {
+            CapabilityScope::Global => false,
+            CapabilityScope::Repository(req_repo) => granted_repo == req_repo,
+            CapabilityScope::Path { repo, .. } => granted_repo == repo,
+            CapabilityScope::Branch { repo, .. } => granted_repo == repo,
+        },
+        CapabilityScope::Path { repo: g_repo, pattern: g_pat } => match required {
+            CapabilityScope::Path { repo: r_repo, pattern: r_pat } => {
+                g_repo == r_repo && gritgrub_core::policy::glob_match_ref(g_pat, r_pat)
+            }
+            _ => false,
+        },
+        CapabilityScope::Branch { repo: g_repo, pattern: g_pat } => match required {
+            CapabilityScope::Branch { repo: r_repo, pattern: r_pat } => {
+                g_repo == r_repo && gritgrub_core::policy::glob_match_ref(g_pat, r_pat)
+            }
+            _ => false,
+        },
     }
 }

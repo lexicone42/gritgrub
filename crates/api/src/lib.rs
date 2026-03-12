@@ -12,8 +12,13 @@ mod server;
 mod auth;
 mod attestation_service;
 mod event_service;
+pub mod config;
+pub mod rate_limit;
+mod serve;
 
 pub use server::RepoServer;
-pub use auth::{auth_interceptor, require_auth, optional_auth, AuthenticatedIdentity};
+pub use auth::{auth_interceptor, require_auth, require_scope, optional_auth, AuthenticatedRequest};
 pub use attestation_service::AttestationServer;
-pub use event_service::EventServer;
+pub use event_service::{EventServer, EventBroadcaster};
+pub use config::ServerConfig;
+pub use serve::ForgeServer;

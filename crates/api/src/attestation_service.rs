@@ -5,7 +5,7 @@ use gritgrub_core::attestation::Statement;
 use gritgrub_store::Repository;
 use crate::pb;
 use crate::pb::attestation_service_server::AttestationService;
-use crate::auth::require_auth;
+use crate::auth::require_scope;
 
 pub struct AttestationServer {
     pub(crate) repo: Arc<Repository>,
@@ -41,7 +41,7 @@ impl AttestationService for AttestationServer {
         &self,
         request: Request<pb::CreateAttestationRequest>,
     ) -> Result<Response<pb::CreateAttestationResponse>, Status> {
-        require_auth(&request)?;
+        require_scope(&request, |s| s.allows_attest(), "attest")?;
         let req = request.into_inner();
 
         let cs_id = from_pb_object_id(
