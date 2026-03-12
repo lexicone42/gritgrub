@@ -10,6 +10,7 @@ pub fn run(id_prefix: &str) -> Result<()> {
         Object::Blob(blob) => print_blob(&blob),
         Object::Tree(tree) => print_tree(&tree),
         Object::Changeset(cs) => print_changeset(&id, &cs),
+        Object::Envelope(env) => print_envelope(&id, &env),
     }
 
     Ok(())
@@ -46,6 +47,25 @@ fn print_tree(tree: &Tree) {
             EntryKind::Symlink => "link ",
         };
         println!("  {} {} {}", kind, entry.id, name);
+    }
+}
+
+fn print_envelope(id: &ObjectId, env: &Envelope) {
+    println!("type          envelope (DSSE)");
+    println!("id            {}", id.to_hex());
+    println!("payload_type  {}", env.payload_type);
+    println!("payload_size  {} bytes", env.payload.len());
+    println!("signatures    {}", env.signatures.len());
+    for (i, sig) in env.signatures.iter().enumerate() {
+        println!("  sig[{}]  signer={} ({} bytes)", i, sig.keyid, sig.sig.len());
+    }
+    // Try to parse and display the statement.
+    if let Ok(text) = std::str::from_utf8(&env.payload) {
+        println!();
+        println!("payload:");
+        for line in text.lines().take(50) {
+            println!("  {}", line);
+        }
     }
 }
 

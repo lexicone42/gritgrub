@@ -97,6 +97,27 @@ enum Commands {
     /// Export forge-native changesets to git
     ExportGit,
 
+    /// Supply-chain attestations (SLSA, in-toto, code review)
+    Attest {
+        #[command(subcommand)]
+        action: AttestAction,
+    },
+
+    /// Software Bill of Materials (CycloneDX)
+    Sbom {
+        #[command(subcommand)]
+        action: SbomAction,
+    },
+
+    /// Verify attestations and supply-chain policies
+    Verify {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
+        /// Required SLSA level (L0-L3)
+        #[arg(long)]
+        slsa: Option<String>,
+    },
+
     /// Start the gRPC server
     Serve {
         /// Address to listen on
@@ -130,6 +151,50 @@ enum IdentityAction {
     Use {
         /// Identity UUID
         id: String,
+    },
+    /// Generate a signing keypair for an identity
+    Keygen {
+        /// Identity UUID (defaults to active identity)
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttestAction {
+    /// Create a SLSA provenance attestation
+    Provenance {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
+    },
+    /// Create a code review attestation
+    Review {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
+        /// Review result: approved, request-changes, comment
+        #[arg(long, default_value = "approved")]
+        result: String,
+        /// Review comment
+        #[arg(short, long, default_value = "")]
+        body: String,
+    },
+    /// List attestations for a changeset
+    List {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SbomAction {
+    /// Generate a CycloneDX SBOM from Cargo.lock
+    Generate {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
+    },
+    /// Show the SBOM for a changeset
+    Show {
+        /// Changeset ID (defaults to HEAD)
+        id: Option<String>,
     },
 }
 
@@ -181,6 +246,7 @@ fn main() -> Result<()> {
             }
             IdentityAction::Show { id } => commands::identity::show(&id),
             IdentityAction::Use { id } => commands::identity::activate(&id),
+            IdentityAction::Keygen { id } => commands::identity::keygen(id.as_deref()),
         },
         Commands::Agent { action } => match action {
             AgentAction::Write { key, value, file } => {
@@ -190,6 +256,24 @@ fn main() -> Result<()> {
             AgentAction::List => commands::agent::list(),
         },
         Commands::ExportGit => commands::export_git::run(),
+        Commands::Attest { action } => match action {
+            AttestAction::Provenance { id } => {
+                commands::attest::provenance(id.as_deref())
+            }
+            AttestAction::Review { id, result, body } => {
+                commands::attest::review(id.as_deref(), &result, &body)
+            }
+            AttestAction::List { id } => {
+                commands::attest::list(id.as_deref())
+            }
+        },
+        Commands::Sbom { action } => match action {
+            SbomAction::Generate { id } => commands::sbom::generate(id.as_deref()),
+            SbomAction::Show { id } => commands::sbom::show(id.as_deref()),
+        },
+        Commands::Verify { id, slsa } => {
+            commands::verify::run(id.as_deref(), slsa.as_deref())
+        }
         Commands::Serve { addr } => commands::serve::run(&addr),
     }
 }

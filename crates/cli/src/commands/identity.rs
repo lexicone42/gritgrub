@@ -71,6 +71,31 @@ pub fn show(id_str: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn keygen(id_str: Option<&str>) -> Result<()> {
+    let repo = Repository::discover(&std::env::current_dir()?)?;
+
+    let id = match id_str {
+        Some(s) => {
+            let uuid = uuid::Uuid::parse_str(s)
+                .map_err(|e| anyhow::anyhow!("invalid UUID: {}", e))?;
+            IdentityId(uuid)
+        }
+        None => repo.local_identity()?,
+    };
+
+    let kp = repo.generate_keypair(&id)?;
+    let pub_hex: String = kp.public_bytes().iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    println!("Generated Ed25519 signing keypair for {}", id);
+    println!("  public key:  {}", pub_hex);
+    println!("  secret key:  stored in .forge/keys/{}.secret", id);
+    println!("  public ref:  refs/keys/{}", id);
+
+    Ok(())
+}
+
 pub fn activate(id_str: &str) -> Result<()> {
     let repo = Repository::discover(&std::env::current_dir()?)?;
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use gritgrub_core::*;
+use gritgrub_core::attestation::*;
 use crate::backend::{ObjectStore, RefStore};
 use crate::redb_backend::RedbBackend;
 
@@ -367,6 +368,189 @@ impl Repository {
         }
 
         Ok(())
+    }
+
+    // ── Key management ────────────────────────────────────────────
+
+    /// Directory where secret keys live (never in the object store).
+    fn keys_dir(&self) -> PathBuf {
+        self.root.join(FORGE_DIR).join("keys")
+    }
+
+    /// Generate and store a keypair for an identity.
+    pub fn generate_keypair(&self, identity: &IdentityId) -> Result<IdentityKeyPair> {
+        let kp = IdentityKeyPair::generate(*identity);
+
+        // Store secret key locally.
+        let keys_dir = self.keys_dir();
+        std::fs::create_dir_all(&keys_dir)?;
+        let secret_path = keys_dir.join(format!("{}.secret", identity));
+        std::fs::write(&secret_path, kp.secret_bytes())?;
+
+        // Store public key as a ref (so it can sync to remotes).
+        let public_blob = Object::Blob(Blob { data: kp.public_bytes().to_vec() });
+        let blob_id = self.put_object(&public_blob)?;
+        self.set_ref(
+            &format!("refs/keys/{}", identity),
+            &Ref::Direct(blob_id),
+        )?;
+
+        Ok(kp)
+    }
+
+    /// Load the keypair for an identity (requires local secret key).
+    pub fn load_keypair(&self, identity: &IdentityId) -> Result<IdentityKeyPair> {
+        let secret_path = self.keys_dir().join(format!("{}.secret", identity));
+        if !secret_path.exists() {
+            bail!("no signing key for identity {} (run `forge identity keygen`)", identity);
+        }
+        let secret_bytes: [u8; 32] = std::fs::read(&secret_path)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("corrupt key file for {}", identity))?;
+        Ok(IdentityKeyPair::from_secret_bytes(*identity, &secret_bytes))
+    }
+
+    /// Load the keypair for the active identity.
+    pub fn load_active_keypair(&self) -> Result<IdentityKeyPair> {
+        let id = self.local_identity()?;
+        self.load_keypair(&id)
+    }
+
+    /// Get the public key for any identity (from the object store).
+    pub fn get_public_key(&self, identity: &IdentityId) -> Result<Option<[u8; 32]>> {
+        let ref_name = format!("refs/keys/{}", identity);
+        let blob_id = match self.resolve_ref(&ref_name)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        match self.get_object(&blob_id)? {
+            Some(Object::Blob(blob)) => {
+                let bytes: [u8; 32] = blob.data.try_into()
+                    .map_err(|_| anyhow::anyhow!("corrupt public key blob for {}", identity))?;
+                Ok(Some(bytes))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    // ── Attestations ─────────────────────────────────────────────
+
+    /// Create and sign an attestation envelope for a changeset.
+    pub fn attest(
+        &self,
+        changeset_id: &ObjectId,
+        statement: &Statement,
+    ) -> Result<ObjectId> {
+        let kp = self.load_active_keypair()?;
+        let envelope = kp.sign_envelope(statement, "application/vnd.in-toto+json");
+        let env_id = self.put_object(&Object::Envelope(envelope))?;
+
+        // Store a ref so we can find attestations for this changeset.
+        let short_id = &changeset_id.to_hex()[..16];
+        let existing = self.list_attestation_refs(changeset_id)?;
+        let index = existing.len();
+        let ref_name = format!("refs/attestations/{}/{}", short_id, index);
+        self.set_ref(&ref_name, &Ref::Direct(env_id))?;
+
+        Ok(env_id)
+    }
+
+    /// List all attestation envelope IDs for a changeset.
+    pub fn list_attestation_refs(&self, changeset_id: &ObjectId) -> Result<Vec<(String, ObjectId)>> {
+        let prefix = format!("refs/attestations/{}/", &changeset_id.to_hex()[..16]);
+        let refs = self.list_refs(&prefix)?;
+        let mut result = Vec::new();
+        for (name, reference) in refs {
+            if let Ref::Direct(id) = reference {
+                result.push((name, id));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Get all attestation envelopes for a changeset.
+    pub fn get_attestations(&self, changeset_id: &ObjectId) -> Result<Vec<(ObjectId, Envelope)>> {
+        let refs = self.list_attestation_refs(changeset_id)?;
+        let mut envelopes = Vec::new();
+        for (_name, env_id) in refs {
+            match self.get_object(&env_id)? {
+                Some(Object::Envelope(env)) => envelopes.push((env_id, env)),
+                _ => {} // skip corrupt refs
+            }
+        }
+        Ok(envelopes)
+    }
+
+    /// Verify all attestations for a changeset against known public keys.
+    pub fn verify_attestations(&self, changeset_id: &ObjectId) -> Result<Vec<VerificationResult>> {
+        let envelopes = self.get_attestations(changeset_id)?;
+        let mut results = Vec::new();
+
+        for (env_id, envelope) in &envelopes {
+            // Parse the statement to get the predicate type.
+            let statement: Statement = serde_json::from_slice(&envelope.payload)
+                .map_err(|e| anyhow::anyhow!("malformed statement in {}: {}", env_id, e))?;
+
+            for (sig_idx, sig) in envelope.signatures.iter().enumerate() {
+                let public_key = self.get_public_key(&sig.keyid)?;
+                let verified = match public_key {
+                    Some(pk) => verify_envelope_signature(envelope, sig_idx, &pk)
+                        .unwrap_or(false),
+                    None => false,
+                };
+
+                results.push(VerificationResult {
+                    envelope_id: *env_id,
+                    predicate_type: statement.predicate_type.clone(),
+                    signer: sig.keyid,
+                    verified,
+                    key_found: public_key.is_some(),
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Check if a changeset meets a given SLSA level.
+    pub fn check_slsa_level(&self, changeset_id: &ObjectId, required: SlsaLevel) -> Result<bool> {
+        if required == SlsaLevel::L0 {
+            return Ok(true);
+        }
+
+        let verifications = self.verify_attestations(changeset_id)?;
+
+        // L1: at least one verified SLSA provenance attestation.
+        let has_provenance = verifications.iter().any(|v| {
+            v.verified && v.predicate_type == SLSA_PROVENANCE_V1
+        });
+
+        if required == SlsaLevel::L1 {
+            return Ok(has_provenance);
+        }
+
+        if !has_provenance {
+            return Ok(false);
+        }
+
+        // L2: provenance signed by a builder identity distinct from the author.
+        let cs = match self.get_object(changeset_id)? {
+            Some(Object::Changeset(cs)) => cs,
+            _ => return Ok(false),
+        };
+
+        let has_independent_provenance = verifications.iter().any(|v| {
+            v.verified
+                && v.predicate_type == SLSA_PROVENANCE_V1
+                && v.signer != cs.author
+        });
+
+        if required == SlsaLevel::L2 {
+            return Ok(has_independent_provenance);
+        }
+
+        // L3: would require hermetic build verification — not yet implemented.
+        Ok(false)
     }
 
     // ── Internals ───────────────────────────────────────────────────

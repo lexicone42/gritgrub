@@ -12,3 +12,6 @@ pub mod identity;
 pub mod agent;
 pub mod serve;
 pub mod export_git;
+pub mod attest;
+pub mod sbom;
+pub mod verify;

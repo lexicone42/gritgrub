@@ -21,6 +21,7 @@ pub fn run(id_prefix: Option<&str>) -> Result<()> {
         Object::Changeset(cs) => cs,
         Object::Blob(_) => bail!("{} is a blob, not a changeset", id),
         Object::Tree(_) => bail!("{} is a tree, not a changeset", id),
+        Object::Envelope(_) => bail!("{} is an attestation envelope, not a changeset", id),
     };
 
     // Header.

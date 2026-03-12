@@ -76,6 +76,13 @@ impl RepoService for RepoServer {
                     object: Some(pb::get_object_response::Object::Changeset(pb_cs)),
                 }
             }
+            Object::Envelope(env) => {
+                // Serialize envelope payload as a blob for now.
+                // Full attestation RPC support comes later.
+                pb::GetObjectResponse {
+                    object: Some(pb::get_object_response::Object::Blob(pb::Blob { data: env.payload })),
+                }
+            }
         };
 
         Ok(Response::new(response))
