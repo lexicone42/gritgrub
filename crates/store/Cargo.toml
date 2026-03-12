@@ -1,0 +1,13 @@
+[package]
+name = "gritgrub-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gritgrub-core = { workspace = true }
+redb = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

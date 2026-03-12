@@ -1,0 +1,7 @@
+[package]
+name = "gritgrub-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gritgrub-core = { workspace = true }

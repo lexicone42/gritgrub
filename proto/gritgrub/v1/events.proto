@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package gritgrub.v1;
+
+import "gritgrub/v1/objects.proto";
+import "gritgrub/v1/identity.proto";
+
+// Event stream — agents subscribe to changes they care about.
+service EventService {
+  // Subscribe to repository events matching a filter.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message SubscribeRequest {
+  // Filter events to specific paths (glob patterns).
+  repeated string path_patterns = 1;
+  // Filter to specific event types.
+  repeated EventKind kinds = 2;
+  // Filter to specific branches.
+  repeated string branches = 3;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_CHANGESET_CREATED = 1;
+  EVENT_KIND_REF_UPDATED = 2;
+  EVENT_KIND_IDENTITY_CREATED = 3;
+  EVENT_KIND_REVIEW_REQUESTED = 4;
+}
+
+message Event {
+  EventKind kind = 1;
+  int64 timestamp_micros = 2;
+  IdentityId actor = 3;
+
+  oneof payload {
+    ChangesetCreatedEvent changeset_created = 10;
+    RefUpdatedEvent ref_updated = 11;
+    ReviewRequestedEvent review_requested = 12;
+  }
+}
+
+message ChangesetCreatedEvent {
+  ObjectId id = 1;
+  Changeset changeset = 2;
+  string branch = 3;
+}
+
+message RefUpdatedEvent {
+  string ref_name = 1;
+  optional ObjectId old_target = 2;
+  ObjectId new_target = 3;
+}
+
+message ReviewRequestedEvent {
+  ObjectId changeset_id = 1;
+  repeated IdentityId reviewers = 2;
+}

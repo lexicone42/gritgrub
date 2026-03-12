@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package gritgrub.v1;
+
+import "gritgrub/v1/objects.proto";
+import "gritgrub/v1/identity.proto";
+
+// Core repository operations. All mutations require a valid identity token.
+service RepoService {
+  // Object store
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc PutObject(PutObjectRequest) returns (PutObjectResponse);
+  rpc HasObject(HasObjectRequest) returns (HasObjectResponse);
+
+  // Refs
+  rpc GetRef(GetRefRequest) returns (GetRefResponse);
+  rpc SetRef(SetRefRequest) returns (SetRefResponse);
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+
+  // Changesets (high-level)
+  rpc CreateChangeset(CreateChangesetRequest) returns (CreateChangesetResponse);
+  rpc GetChangeset(GetChangesetRequest) returns (GetChangesetResponse);
+  rpc Log(LogRequest) returns (stream LogEntry);
+
+  // Identity
+  rpc CreateIdentity(CreateIdentityRequest) returns (CreateIdentityResponse);
+  rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
+}
+
+// ── Object store ────────────────────────────────────────────────────
+
+message GetObjectRequest { ObjectId id = 1; }
+message GetObjectResponse {
+  oneof object {
+    Blob blob = 1;
+    Tree tree = 2;
+    Changeset changeset = 3;
+  }
+}
+
+message PutObjectRequest {
+  oneof object {
+    Blob blob = 1;
+    Tree tree = 2;
+    Changeset changeset = 3;
+  }
+}
+message PutObjectResponse { ObjectId id = 1; }
+
+message HasObjectRequest { ObjectId id = 1; }
+message HasObjectResponse { bool exists = 1; }
+
+// ── Refs ────────────────────────────────────────────────────────────
+
+message RefValue {
+  oneof value {
+    ObjectId direct = 1;
+    string symbolic = 2;
+  }
+}
+
+message GetRefRequest { string name = 1; }
+message GetRefResponse {
+  optional RefValue value = 1;
+  optional ObjectId resolved = 2;  // fully resolved ObjectId
+}
+
+message SetRefRequest {
+  string name = 1;
+  RefValue value = 2;
+}
+message SetRefResponse {}
+
+message ListRefsRequest { string prefix = 1; }
+message ListRefsResponse {
+  repeated RefEntry refs = 1;
+}
+message RefEntry {
+  string name = 1;
+  RefValue value = 2;
+}
+
+// ── Changesets ──────────────────────────────────────────────────────
+
+message CreateChangesetRequest {
+  repeated ObjectId parents = 1;
+  ObjectId tree = 2;
+  string message = 3;
+  optional Intent intent = 4;
+  map<string, string> metadata = 5;
+  // Author is inferred from the authenticated identity.
+}
+message CreateChangesetResponse { ObjectId id = 1; }
+
+message GetChangesetRequest { ObjectId id = 1; }
+message GetChangesetResponse { Changeset changeset = 1; }
+
+message LogRequest {
+  ObjectId from = 1;    // starting changeset (defaults to HEAD)
+  uint32 max_count = 2;
+}
+message LogEntry {
+  ObjectId id = 1;
+  Changeset changeset = 2;
+}
+
+// ── Identity ────────────────────────────────────────────────────────
+
+message CreateIdentityRequest {
+  IdentityKind kind = 1;
+  string name = 2;
+}
+message CreateIdentityResponse { Identity identity = 1; }
+
+message GetIdentityRequest { IdentityId id = 1; }
+message GetIdentityResponse { Identity identity = 1; }

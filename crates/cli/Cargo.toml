@@ -1,0 +1,15 @@
+[package]
+name = "gritgrub-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[dependencies]
+gritgrub-core = { workspace = true }
+gritgrub-store = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }

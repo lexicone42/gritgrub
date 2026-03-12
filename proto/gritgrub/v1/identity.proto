@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package gritgrub.v1;
+
+message IdentityId {
+  bytes uuid = 1;  // 16-byte UUID
+}
+
+message Identity {
+  IdentityId id = 1;
+  IdentityKind kind = 2;
+  string name = 3;
+  repeated PublicKey public_keys = 4;
+  repeated Capability capabilities = 5;
+  int64 created_at_micros = 6;
+}
+
+enum IdentityKind {
+  IDENTITY_KIND_UNSPECIFIED = 0;
+  IDENTITY_KIND_HUMAN = 1;
+  IDENTITY_KIND_AGENT = 2;
+}
+
+message PublicKey {
+  string algorithm = 1;  // "ed25519", "rsa", etc.
+  bytes data = 2;
+}
+
+// Capability-based permission: an identity can do X within scope Y.
+message Capability {
+  CapabilityScope scope = 1;
+  uint32 permissions = 2;  // bitflags: 1=Read, 2=Write, 4=Create, 8=Delete, 16=Admin
+  optional int64 expires_at_micros = 3;
+  optional RateLimit rate_limit = 4;
+}
+
+message CapabilityScope {
+  oneof scope {
+    GlobalScope global = 1;
+    RepositoryScope repository = 2;
+    PathScope path = 3;
+    BranchScope branch = 4;
+  }
+}
+
+message GlobalScope {}
+message RepositoryScope { string name = 1; }
+message PathScope { string repo = 1; string pattern = 2; }
+message BranchScope { string repo = 1; string pattern = 2; }
+
+message RateLimit {
+  uint32 max_operations = 1;
+  uint32 window_seconds = 2;
+}

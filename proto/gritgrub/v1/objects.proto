@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package gritgrub.v1;
+
+// Content-addressed object identifier (32-byte BLAKE3 hash).
+message ObjectId {
+  bytes hash = 1;
+}
+
+// Raw file content.
+message Blob {
+  bytes data = 1;
+}
+
+// Directory listing. Entries are sorted by name for deterministic hashing.
+message Tree {
+  map<string, TreeEntry> entries = 1;
+}
+
+message TreeEntry {
+  ObjectId id = 1;
+  EntryKind kind = 2;
+  bool executable = 3;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  ENTRY_KIND_FILE = 1;
+  ENTRY_KIND_DIRECTORY = 2;
+  ENTRY_KIND_SYMLINK = 3;
+}
+
+// A changeset is the fundamental unit of change — richer than a git commit.
+// It carries structured semantic intent alongside the tree snapshot.
+message Changeset {
+  repeated ObjectId parents = 1;
+  ObjectId tree = 2;
+  bytes author_id = 3;          // 16-byte UUID (IdentityId)
+  int64 timestamp_micros = 4;   // unix epoch microseconds
+  string message = 5;
+  optional Intent intent = 6;
+  map<string, string> metadata = 7;
+}
+
+// Structured "why" for a changeset — designed for agents to produce
+// and tooling to consume without parsing commit messages.
+message Intent {
+  IntentKind kind = 1;
+  repeated string affected_paths = 2;
+  string rationale = 3;
+  optional ObjectId context_ref = 4;  // agent scratchpad/trace blob
+  repeated Verification verifications = 5;
+}
+
+enum IntentKind {
+  INTENT_KIND_UNSPECIFIED = 0;
+  INTENT_KIND_FEATURE = 1;
+  INTENT_KIND_BUGFIX = 2;
+  INTENT_KIND_REFACTOR = 3;
+  INTENT_KIND_AGENT_TASK = 4;
+  INTENT_KIND_EXPLORATION = 5;
+  INTENT_KIND_DEPENDENCY = 6;
+  INTENT_KIND_DOCUMENTATION = 7;
+}
+
+message Verification {
+  VerificationKind kind = 1;
+  VerificationStatus status = 2;
+  string details = 3;
+}
+
+enum VerificationKind {
+  VERIFICATION_KIND_UNSPECIFIED = 0;
+  VERIFICATION_KIND_TEST_PASS = 1;
+  VERIFICATION_KIND_LINT_CLEAN = 2;
+  VERIFICATION_KIND_TYPE_CHECK = 3;
+  VERIFICATION_KIND_MANUAL_REVIEW = 4;
+}
+
+enum VerificationStatus {
+  VERIFICATION_STATUS_UNSPECIFIED = 0;
+  VERIFICATION_STATUS_PENDING = 1;
+  VERIFICATION_STATUS_PASSED = 2;
+  VERIFICATION_STATUS_FAILED = 3;
+  VERIFICATION_STATUS_SKIPPED = 4;
+}

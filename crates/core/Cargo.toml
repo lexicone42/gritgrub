@@ -1,0 +1,11 @@
+[package]
+name = "gritgrub-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
