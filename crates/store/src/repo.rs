@@ -150,9 +150,38 @@ impl Repository {
         self.backend.get_object(id)
     }
 
+    /// Find an object by hex prefix (at least 8 chars).
+    pub fn find_by_prefix(&self, hex_prefix: &str) -> Result<(ObjectId, Object)> {
+        // Full ID — direct lookup.
+        if hex_prefix.len() == 64 {
+            let id = ObjectId::from_hex(hex_prefix)?;
+            return match self.get_object(&id)? {
+                Some(obj) => Ok((id, obj)),
+                None => bail!("object not found: {}", id),
+            };
+        }
+
+        let matches = self.backend.find_objects_by_prefix(hex_prefix)?;
+        match matches.len() {
+            0 => bail!("no object matching prefix '{}'", hex_prefix),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            _ => bail!(
+                "ambiguous prefix '{}': matches {} and {}",
+                hex_prefix,
+                matches[0].0,
+                matches[1].0,
+            ),
+        }
+    }
+
     /// Set a ref directly (used by import, branch management, etc.).
     pub fn set_ref(&self, name: &str, reference: &Ref) -> Result<()> {
         self.backend.set_ref(name, reference)
+    }
+
+    /// List refs with the given prefix (e.g., "refs/heads/").
+    pub fn list_refs(&self, prefix: &str) -> Result<Vec<(String, Ref)>> {
+        self.backend.list_refs(prefix)
     }
 
     // ── High-level operations ───────────────────────────────────────

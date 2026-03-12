@@ -55,6 +55,31 @@ impl RedbBackend {
     }
 }
 
+impl RedbBackend {
+    /// Find objects whose hex ID starts with `hex_prefix`.
+    pub fn find_objects_by_prefix(&self, hex_prefix: &str) -> Result<Vec<(ObjectId, Object)>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(OBJECTS)?;
+        let mut results = Vec::new();
+
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let key_bytes: [u8; 32] = key.value().try_into()
+                .map_err(|_| anyhow::anyhow!("invalid object key length"))?;
+            let id = ObjectId::from_bytes(key_bytes);
+            if id.to_hex().starts_with(hex_prefix) {
+                let obj = Object::from_tagged_bytes(value.value())?;
+                results.push((id, obj));
+                if results.len() > 1 {
+                    break; // ambiguous prefix, stop early
+                }
+            }
+        }
+
+        Ok(results)
+    }
+}
+
 impl ObjectStore for RedbBackend {
     fn put_object(&self, object: &Object) -> Result<ObjectId> {
         let id = object.id();

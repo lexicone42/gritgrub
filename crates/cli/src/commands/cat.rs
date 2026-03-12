@@ -1,23 +1,15 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use gritgrub_core::*;
 use gritgrub_store::Repository;
 
 pub fn run(id_prefix: &str) -> Result<()> {
-    if id_prefix.len() < 8 {
-        bail!("object ID prefix must be at least 8 hex characters");
-    }
-
-    // For now, require a full 64-char hex ID. Prefix lookup comes later.
-    let id = ObjectId::from_hex(id_prefix)
-        .map_err(|e| anyhow::anyhow!("invalid object ID: {}", e))?;
-
     let repo = Repository::discover(&std::env::current_dir()?)?;
+    let (id, obj) = repo.find_by_prefix(id_prefix)?;
 
-    match repo.get_object(&id)? {
-        Some(Object::Blob(blob)) => print_blob(&blob),
-        Some(Object::Tree(tree)) => print_tree(&tree),
-        Some(Object::Changeset(cs)) => print_changeset(&id, &cs),
-        None => bail!("object not found: {}", id),
+    match obj {
+        Object::Blob(blob) => print_blob(&blob),
+        Object::Tree(tree) => print_tree(&tree),
+        Object::Changeset(cs) => print_changeset(&id, &cs),
     }
 
     Ok(())
@@ -28,7 +20,6 @@ fn print_blob(blob: &Blob) {
     println!("size  {} bytes", blob.data.len());
     println!();
 
-    // Try to display as UTF-8, fall back to hex dump.
     match std::str::from_utf8(&blob.data) {
         Ok(text) => print!("{}", text),
         Err(_) => {
@@ -44,7 +35,7 @@ fn print_blob(blob: &Blob) {
 }
 
 fn print_tree(tree: &Tree) {
-    println!("type  tree");
+    println!("type     tree");
     println!("entries  {}", tree.entries.len());
     println!();
 
@@ -61,12 +52,16 @@ fn print_tree(tree: &Tree) {
 fn print_changeset(id: &ObjectId, cs: &Changeset) {
     println!("type       changeset");
     println!("id         {}", id.to_hex());
-    println!("tree       {}", cs.tree.to_hex());
-    println!("author     {}", cs.author);
-    println!("timestamp  {}", cs.timestamp);
+    println!("tree       {}", cs.tree);
 
     for (i, parent) in cs.parents.iter().enumerate() {
-        println!("parent[{}]  {}", i, parent.to_hex());
+        println!("parent[{}]  {}", i, parent);
+    }
+
+    println!("author     {}", cs.author);
+
+    if let Some(dt) = chrono::DateTime::from_timestamp_micros(cs.timestamp) {
+        println!("date       {}", dt.format("%Y-%m-%d %H:%M:%S UTC"));
     }
 
     if let Some(ref intent) = cs.intent {
@@ -81,5 +76,7 @@ fn print_changeset(id: &ObjectId, cs: &Changeset) {
     }
 
     println!();
-    println!("    {}", cs.message);
+    for line in cs.message.lines() {
+        println!("    {}", line);
+    }
 }

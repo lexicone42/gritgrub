@@ -13,17 +13,40 @@ pub fn run() -> Result<()> {
     }
 
     let git_branch = git_current_branch(repo.root())?;
-    let commits = git_log(repo.root())?;
+    let all_commits = git_log(repo.root())?;
 
-    if commits.is_empty() {
+    if all_commits.is_empty() {
         println!("No git commits to import");
         return Ok(());
     }
 
-    println!("Importing {} commits from git ({})...", commits.len(), git_branch);
+    // Incremental: find already-imported commits via metadata.
+    let mut sha_to_forge: HashMap<String, ObjectId> = HashMap::new();
+    let existing = repo.log(usize::MAX)?;
+    for (id, cs) in &existing {
+        if let Some(sha) = cs.metadata.get("git.sha") {
+            sha_to_forge.insert(sha.clone(), *id);
+        }
+    }
+
+    let commits: Vec<&GitCommit> = all_commits
+        .iter()
+        .filter(|c| !sha_to_forge.contains_key(&c.hash))
+        .collect();
+
+    if commits.is_empty() {
+        println!("Already up to date ({} commits in forge)", existing.len());
+        return Ok(());
+    }
+
+    println!(
+        "Importing {} new commits from git ({}, {} already imported)...",
+        commits.len(),
+        git_branch,
+        sha_to_forge.len(),
+    );
 
     let author = repo.local_identity()?;
-    let mut sha_to_forge: HashMap<String, ObjectId> = HashMap::new();
     let mut blob_cache: HashMap<String, ObjectId> = HashMap::new();
 
     for (i, commit) in commits.iter().enumerate() {
@@ -85,7 +108,7 @@ pub fn run() -> Result<()> {
         }
     }
 
-    println!("Imported {} commits, {} unique blobs", commits.len(), blob_cache.len());
+    println!("Imported {} new commits, {} unique blobs", commits.len(), blob_cache.len());
     Ok(())
 }
 
