@@ -288,14 +288,37 @@ impl Repository {
     }
 
     fn should_ignore(&self, name: &str, dir: &Path) -> bool {
-        if matches!(name, "target" | "node_modules" | ".git") {
+        // Always ignore these anywhere in the tree.
+        if matches!(name, "target" | "node_modules" | ".git" | ".claude") {
             return true;
         }
         // Only ignore .forge at the repo root.
         if name == ".forge" && dir == self.root {
             return true;
         }
+        // Check .forgeignore at the repo root.
+        if let Ok(patterns) = self.forgeignore_patterns() {
+            for pattern in &patterns {
+                if pattern == name {
+                    return true;
+                }
+            }
+        }
         false
+    }
+
+    fn forgeignore_patterns(&self) -> Result<Vec<String>> {
+        let path = self.root.join(".forgeignore");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let content = std::fs::read_to_string(&path)?;
+        Ok(content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect())
     }
 
     fn diff_tree(
