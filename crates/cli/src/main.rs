@@ -93,6 +93,16 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+
+    /// Export forge-native changesets to git
+    ExportGit,
+
+    /// Start the gRPC server
+    Serve {
+        /// Address to listen on
+        #[arg(long, default_value = "[::1]:50051")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -179,5 +189,7 @@ fn main() -> Result<()> {
             AgentAction::Read { key } => commands::agent::read(&key),
             AgentAction::List => commands::agent::list(),
         },
+        Commands::ExportGit => commands::export_git::run(),
+        Commands::Serve { addr } => commands::serve::run(&addr),
     }
 }

@@ -1,7 +1,12 @@
-//! gRPC API layer for gritgrub.
-//!
-//! Proto definitions live in `proto/gritgrub/v1/`. This crate will wire them
-//! up via tonic once we need a running server. For now, it re-exports core
-//! types so downstream consumers have a single dependency for the full stack.
+pub mod proto {
+    pub mod gritgrub {
+        pub mod v1 {
+            tonic::include_proto!("gritgrub.v1");
+        }
+    }
+}
 
-pub use gritgrub_core::*;
+pub use proto::gritgrub::v1 as pb;
+
+mod server;
+pub use server::RepoServer;

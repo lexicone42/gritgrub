@@ -5,3 +5,12 @@ edition.workspace = true
 
 [dependencies]
 gritgrub-core = { workspace = true }
+gritgrub-store = { workspace = true }
+prost = { workspace = true }
+tonic = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = { workspace = true }
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
