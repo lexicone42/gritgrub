@@ -151,6 +151,8 @@ impl ForgeServer {
                 max_object_size: self.config.limits.max_message_size,
                 cors_origins: vec![],
                 event_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+                grpc_url: format!("https://{}", grpc_addr),
+                http_url: format!("http://{}", http_addr),
             };
             let app = http_gateway::router(http_state);
             let listener = tokio::net::TcpListener::bind(http_addr).await

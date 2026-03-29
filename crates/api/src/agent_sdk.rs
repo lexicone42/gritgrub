@@ -39,9 +39,17 @@ pub struct AgentSession {
 }
 
 /// Agent configuration — output of `forge provision`.
+///
+/// Contains everything an agent needs to connect and start working.
+/// The `server_url` is the gRPC endpoint for push/pull.
+/// The `http_url` is the HTTP endpoint for coordination APIs.
+/// If `http_url` is not set, it's derived from `server_url` by
+/// replacing the port with 8080.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub server_url: String,
+    #[serde(default)]
+    pub http_url: Option<String>,
     pub token: String,
     pub identity: String,
     pub name: String,
@@ -179,10 +187,14 @@ impl AgentSession {
     pub fn from_config(json: &str) -> Result<Self> {
         let config: AgentConfig = serde_json::from_str(json)
             .context("failed to parse agent config JSON")?;
-        let http = reqwest_lite::Client::new(
-            &config.server_url.replace("grpc", "http").replace(":50051", ":8080"),
-            Some(&config.token),
-        );
+        // Derive HTTP URL from gRPC URL if not explicitly set.
+        let http_base = config.http_url.clone().unwrap_or_else(|| {
+            // https://server:50051 → http://server:8080
+            config.server_url
+                .replace("https://", "http://")
+                .replace(":50051", ":8080")
+        });
+        let http = reqwest_lite::Client::new(&http_base, Some(&config.token));
         Ok(Self { config, http })
     }
 
@@ -197,6 +209,7 @@ impl AgentSession {
     pub fn new(server_url: &str, token: &str, identity: &str) -> Self {
         let config = AgentConfig {
             server_url: server_url.to_string(),
+            http_url: None,
             token: token.to_string(),
             identity: identity.to_string(),
             name: String::new(),

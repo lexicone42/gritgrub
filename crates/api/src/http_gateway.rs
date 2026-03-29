@@ -37,9 +37,12 @@ pub struct HttpState {
     pub max_object_size: usize,
     /// Allowed CORS origins (empty = allow all for development).
     pub cors_origins: Vec<String>,
-    /// Notification channel for push-based SSE. Handlers call notify_waiters()
-    /// after mutations so the SSE stream wakes up immediately.
+    /// Notification channel for push-based SSE.
     pub event_notify: Arc<Notify>,
+    /// gRPC server address (for provision responses).
+    pub grpc_url: String,
+    /// HTTP server address (for provision responses).
+    pub http_url: String,
 }
 
 /// Build the axum Router for the HTTP/JSON gateway.
@@ -951,8 +954,14 @@ fn default_runtime() -> String { "claude-code".into() }
 fn default_expiry() -> u64 { 24 }
 fn default_scope() -> String { "read,write,attest".into() }
 
+/// Provision response — compatible with AgentConfig in the agent SDK.
+/// Can be passed directly as FORGE_AGENT_CONFIG to sandbox processes.
 #[derive(Serialize)]
 struct ProvisionResponse {
+    /// gRPC server URL (for push/pull).
+    server_url: String,
+    /// HTTP server URL (for coordination APIs).
+    http_url: String,
     identity: String,
     name: String,
     token: String,
@@ -1035,6 +1044,8 @@ async fn provision_agent(
 
     state.event_notify.notify_waiters();
     Ok(Json(ProvisionResponse {
+        server_url: state.grpc_url.clone(),
+        http_url: state.http_url.clone(),
         identity: identity.id.to_string(),
         name: agent_name,
         token,
@@ -1118,6 +1129,8 @@ async fn provision_batch(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         results.push(ProvisionResponse {
+            server_url: state.grpc_url.clone(),
+            http_url: state.http_url.clone(),
             identity: identity.id.to_string(),
             name: agent_name,
             token,
