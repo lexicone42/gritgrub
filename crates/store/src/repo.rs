@@ -7,6 +7,61 @@ use crate::backend::{ObjectStore, RefStore, ConfigStore, IdentityStore, EventSto
 use crate::redb_backend::RedbBackend;
 
 const FORGE_DIR: &str = ".forge";
+
+/// Simple glob match for .forgeignore patterns.
+/// Supports `*` (any chars except `/`), `?` (single char), and exact match.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    glob_match_inner(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_match_inner(pat: &[u8], txt: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_p, mut star_t) = (usize::MAX, 0);
+    while ti < txt.len() {
+        if pi < pat.len() && pat[pi] == b'?' {
+            // ? matches any single char except /
+            if txt[ti] == b'/' {
+                return false;
+            }
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == b'*' {
+            star_p = pi;
+            star_t = ti;
+            pi += 1;
+        } else if pi < pat.len() && pat[pi] == txt[ti] {
+            pi += 1;
+            ti += 1;
+        } else if star_p != usize::MAX {
+            // Backtrack: star matches one more char (but not /)
+            star_t += 1;
+            if txt[star_t - 1] == b'/' {
+                return false;
+            }
+            pi = star_p + 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// Result of a merge operation.
+#[derive(Debug)]
+pub enum MergeResult {
+    /// Theirs was strictly ahead — HEAD moved forward.
+    FastForward(ObjectId),
+    /// Ours is already up to date (theirs is ancestor of ours).
+    AlreadyUpToDate,
+    /// Three-way merge succeeded — new merge changeset created.
+    Merged(ObjectId),
+    /// Three-way merge has conflicts at these paths.
+    Conflict(Vec<String>),
+}
 const STORE_FILE: &str = "store.redb";
 
 pub struct Repository {
@@ -93,6 +148,11 @@ impl Repository {
         self.backend.set_config(key, value)
     }
 
+    /// List all config entries with the given prefix.
+    pub fn list_config_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        self.backend.list_config_prefix(prefix)
+    }
+
     /// Get the active identity for this repository.
     pub fn local_identity(&self) -> Result<IdentityId> {
         if let Some(id_str) = self.backend.get_config("identity.id")? {
@@ -118,7 +178,7 @@ impl Repository {
             name: name.to_string(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .context("system clock before UNIX epoch")?
                 .as_micros() as i64,
         };
         self.backend.put_identity(&identity)?;
@@ -183,8 +243,31 @@ impl Repository {
         }
     }
 
-    /// Update HEAD (or the branch it points to) to a new changeset.
-    fn update_head(&self, id: &ObjectId) -> Result<()> {
+    /// Update HEAD (or the branch it points to) to a new changeset, atomically.
+    ///
+    /// Uses compare-and-swap to prevent lost updates when multiple writers
+    /// race to advance HEAD. If `expected` doesn't match the current ref
+    /// value, the update fails with an error instead of silently overwriting.
+    ///
+    /// Note: the HEAD→branch indirection read is a separate transaction from
+    /// the CAS on the branch. This is safe in practice because HEAD's symbolic
+    /// target changes only during checkout (rare), not during normal commits.
+    fn update_head_cas(&self, expected: Option<&ObjectId>, new_id: &ObjectId) -> Result<()> {
+        let expected_ref = expected.map(|id| Ref::Direct(*id));
+        let ref_name = match self.backend.get_ref("HEAD")? {
+            Some(Ref::Symbolic(branch)) => branch,
+            _ => "HEAD".to_string(),
+        };
+        if self.backend.cas_ref(&ref_name, expected_ref.as_ref(), &Ref::Direct(*new_id))? {
+            Ok(())
+        } else {
+            bail!("concurrent modification: ref '{}' was updated by another operation — retry", ref_name)
+        }
+    }
+
+    /// Force-update HEAD without CAS. Only for operations that intentionally
+    /// overwrite (e.g., branch checkout, import).
+    fn update_head_force(&self, id: &ObjectId) -> Result<()> {
         match self.backend.get_ref("HEAD")? {
             Some(Ref::Symbolic(branch)) => {
                 self.backend.set_ref(&branch, &Ref::Direct(*id))?;
@@ -240,6 +323,25 @@ impl Repository {
         self.backend.list_refs(prefix)
     }
 
+    /// Compare-and-swap ref update. Returns Ok(true) if the swap succeeded.
+    /// This is the primitive for lock-free concurrent ref updates:
+    /// agents read the current value, do their work, then CAS to update.
+    /// If another agent updated the ref in the meantime, CAS fails and
+    /// the agent can rebase and retry.
+    pub fn cas_ref(&self, name: &str, expected: Option<&Ref>, new: &Ref) -> Result<bool> {
+        self.backend.cas_ref(name, expected, new)
+    }
+
+    /// Delete a ref.
+    pub fn delete_ref(&self, name: &str) -> Result<bool> {
+        self.backend.delete_ref(name)
+    }
+
+    /// Check if an object exists in the store.
+    pub fn has_object(&self, id: &ObjectId) -> Result<bool> {
+        self.backend.has_object(id)
+    }
+
     // ── High-level operations ───────────────────────────────────────
 
     /// Snapshot the working directory and create a new changeset.
@@ -251,18 +353,16 @@ impl Repository {
     ) -> Result<ObjectId> {
         let tree_id = self.snapshot_tree(&self.root)?;
 
-        let parents = match self.resolve_head()? {
-            Some(head) => vec![head],
-            None => vec![],
-        };
+        let previous_head = self.resolve_head()?;
+        let parents: Vec<ObjectId> = previous_head.into_iter().collect();
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .context("system clock before UNIX epoch")?
             .as_micros() as i64;
 
         let changeset = Changeset {
-            parents,
+            parents: parents.clone(),
             tree: tree_id,
             author,
             timestamp,
@@ -272,7 +372,7 @@ impl Repository {
         };
 
         let cs_id = self.put_object(&Object::Changeset(changeset))?;
-        self.update_head(&cs_id)?;
+        self.update_head_cas(parents.first(), &cs_id)?;
         Ok(cs_id)
     }
 
@@ -335,6 +435,11 @@ impl Repository {
                 status.deleted.len(),
             );
         }
+        self.force_checkout_tree(tree_id)
+    }
+
+    /// Checkout without clean-check (used after merge/pull when HEAD was already updated).
+    pub fn force_checkout_tree(&self, tree_id: &ObjectId) -> Result<()> {
         self.clean_working_dir()?;
         self.write_tree(tree_id, &self.root)
     }
@@ -477,11 +582,17 @@ impl Repository {
         let env_id = self.put_object(&Object::Envelope(envelope))?;
 
         // Store a ref so we can find attestations for this changeset.
+        // Uses CAS loop to prevent index collisions under concurrent attestation.
         let short_id = &changeset_id.to_hex()[..16];
-        let existing = self.list_attestation_refs(changeset_id)?;
-        let index = existing.len();
-        let ref_name = format!("refs/attestations/{}/{}", short_id, index);
-        self.set_ref(&ref_name, &Ref::Direct(env_id))?;
+        loop {
+            let existing = self.list_attestation_refs(changeset_id)?;
+            let index = existing.len();
+            let ref_name = format!("refs/attestations/{}/{}", short_id, index);
+            if self.backend.cas_ref(&ref_name, None, &Ref::Direct(env_id))? {
+                break;
+            }
+            // CAS failed — another writer claimed this index. Retry.
+        }
 
         Ok(env_id)
     }
@@ -587,10 +698,9 @@ impl Repository {
     // ── Capabilities ────────────────────────────────────────────────
 
     /// Grant capabilities to an identity (appends to existing).
+    /// Uses a single write transaction to prevent lost-update races.
     pub fn grant_capabilities(&self, id: &IdentityId, new_caps: &[Capability]) -> Result<()> {
-        let mut caps = self.backend.get_capabilities(id)?;
-        caps.extend_from_slice(new_caps);
-        self.backend.set_capabilities(id, &caps)
+        self.backend.atomic_grant_capabilities(id, new_caps)
     }
 
     /// Replace all capabilities for an identity.
@@ -613,7 +723,7 @@ impl Repository {
         let caps = self.backend.get_capabilities(id)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .context("system clock before UNIX epoch")?
             .as_micros() as i64;
 
         for cap in &caps {
@@ -747,6 +857,485 @@ impl Repository {
         self.backend.is_token_revoked(hash.as_bytes().try_into().unwrap())
     }
 
+    // ── Merge ────────────────────────────────────────────────────────
+
+    /// Find the merge base (lowest common ancestor) of two changesets.
+    /// Uses simultaneous BFS from both sides.
+    pub fn find_merge_base(&self, a: &ObjectId, b: &ObjectId) -> Result<Option<ObjectId>> {
+        use std::collections::HashSet;
+        use std::collections::VecDeque;
+
+        let mut seen_a = HashSet::new();
+        let mut seen_b = HashSet::new();
+        let mut queue_a = VecDeque::new();
+        let mut queue_b = VecDeque::new();
+
+        seen_a.insert(*a);
+        seen_b.insert(*b);
+        queue_a.push_back(*a);
+        queue_b.push_back(*b);
+
+        // Immediate check: same changeset.
+        if a == b {
+            return Ok(Some(*a));
+        }
+
+        loop {
+            let progress_a = if let Some(id) = queue_a.pop_front() {
+                if seen_b.contains(&id) {
+                    return Ok(Some(id));
+                }
+                if let Some(Object::Changeset(cs)) = self.get_object(&id)? {
+                    for p in &cs.parents {
+                        if seen_a.insert(*p) {
+                            if seen_b.contains(p) {
+                                return Ok(Some(*p));
+                            }
+                            queue_a.push_back(*p);
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            };
+
+            let progress_b = if let Some(id) = queue_b.pop_front() {
+                if seen_a.contains(&id) {
+                    return Ok(Some(id));
+                }
+                if let Some(Object::Changeset(cs)) = self.get_object(&id)? {
+                    for p in &cs.parents {
+                        if seen_b.insert(*p) {
+                            if seen_a.contains(p) {
+                                return Ok(Some(*p));
+                            }
+                            queue_b.push_back(*p);
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            };
+
+            if !progress_a && !progress_b {
+                return Ok(None); // Disjoint histories.
+            }
+        }
+    }
+
+    /// Check if `ancestor` is an ancestor of `descendant`.
+    pub fn is_ancestor(&self, ancestor: &ObjectId, descendant: &ObjectId) -> Result<bool> {
+        if ancestor == descendant {
+            return Ok(true);
+        }
+        // BFS from descendant looking for ancestor.
+        let mut queue = std::collections::VecDeque::new();
+        let mut seen = std::collections::HashSet::new();
+        queue.push_back(*descendant);
+        seen.insert(*descendant);
+
+        while let Some(id) = queue.pop_front() {
+            if let Some(Object::Changeset(cs)) = self.get_object(&id)? {
+                for p in &cs.parents {
+                    if p == ancestor {
+                        return Ok(true);
+                    }
+                    if seen.insert(*p) {
+                        queue.push_back(*p);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Merge a branch into the current branch.
+    /// Returns the merge changeset ID, or a list of conflicting paths.
+    pub fn merge(
+        &self,
+        branch_name: &str,
+        author: IdentityId,
+    ) -> Result<MergeResult> {
+        let ours_id = self.resolve_head()?
+            .ok_or_else(|| anyhow::anyhow!("HEAD has no commits"))?;
+        let theirs_id = self.resolve_ref(&format!("refs/heads/{}", branch_name))?
+            .ok_or_else(|| anyhow::anyhow!("branch '{}' not found", branch_name))?;
+
+        // Fast-forward: theirs is ahead of ours.
+        if self.is_ancestor(&ours_id, &theirs_id)? {
+            self.update_head_cas(Some(&ours_id), &theirs_id)?;
+            return Ok(MergeResult::FastForward(theirs_id));
+        }
+
+        // Already up to date: ours is ahead of (or equal to) theirs.
+        if self.is_ancestor(&theirs_id, &ours_id)? {
+            return Ok(MergeResult::AlreadyUpToDate);
+        }
+
+        // Three-way merge.
+        let base_id = self.find_merge_base(&ours_id, &theirs_id)?
+            .ok_or_else(|| anyhow::anyhow!(
+                "cannot merge: no common ancestor between HEAD and '{}'", branch_name
+            ))?;
+
+        let base_tree = self.changeset_tree(&base_id)?;
+        let ours_tree = self.changeset_tree(&ours_id)?;
+        let theirs_tree = self.changeset_tree(&theirs_id)?;
+
+        let mut conflicts = Vec::new();
+        let merged_tree_id = self.merge_trees(
+            &base_tree, &ours_tree, &theirs_tree,
+            &mut conflicts, String::new(),
+        )?;
+
+        if !conflicts.is_empty() {
+            return Ok(MergeResult::Conflict(conflicts));
+        }
+
+        // Create merge changeset.
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock before UNIX epoch")?
+            .as_micros() as i64;
+
+        let changeset = Changeset {
+            parents: vec![ours_id, theirs_id],
+            tree: merged_tree_id,
+            author,
+            timestamp,
+            message: format!("Merge branch '{}'", branch_name),
+            intent: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let cs_id = self.put_object(&Object::Changeset(changeset))?;
+        self.update_head_cas(Some(&ours_id), &cs_id)?;
+        Ok(MergeResult::Merged(cs_id))
+    }
+
+    /// Get the tree ID from a changeset.
+    fn changeset_tree(&self, cs_id: &ObjectId) -> Result<ObjectId> {
+        match self.get_object(cs_id)? {
+            Some(Object::Changeset(cs)) => Ok(cs.tree),
+            _ => bail!("expected changeset: {}", cs_id),
+        }
+    }
+
+    /// Three-way merge of tree objects. Returns the merged tree ID.
+    fn merge_trees(
+        &self,
+        base: &ObjectId,
+        ours: &ObjectId,
+        theirs: &ObjectId,
+        conflicts: &mut Vec<String>,
+        prefix: String,
+    ) -> Result<ObjectId> {
+        let base_entries = self.tree_entries(base)?;
+        let ours_entries = self.tree_entries(ours)?;
+        let theirs_entries = self.tree_entries(theirs)?;
+
+        // Collect all entry names.
+        let mut all_names: Vec<String> = base_entries.keys()
+            .chain(ours_entries.keys())
+            .chain(theirs_entries.keys())
+            .cloned()
+            .collect();
+        all_names.sort();
+        all_names.dedup();
+
+        let mut merged = BTreeMap::new();
+
+        for name in &all_names {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
+
+            let b = base_entries.get(name);
+            let o = ours_entries.get(name);
+            let t = theirs_entries.get(name);
+
+            match (b, o, t) {
+                // Unchanged on both sides — keep.
+                (Some(base_e), Some(ours_e), Some(theirs_e))
+                    if ours_e.id == base_e.id && theirs_e.id == base_e.id =>
+                {
+                    merged.insert(name.clone(), ours_e.clone());
+                }
+                // Changed only on ours — take ours.
+                (Some(base_e), Some(ours_e), Some(theirs_e))
+                    if theirs_e.id == base_e.id =>
+                {
+                    merged.insert(name.clone(), ours_e.clone());
+                }
+                // Changed only on theirs — take theirs.
+                (Some(base_e), Some(ours_e), Some(theirs_e))
+                    if ours_e.id == base_e.id =>
+                {
+                    merged.insert(name.clone(), theirs_e.clone());
+                }
+                // Both changed to the same thing — take either.
+                (Some(_), Some(ours_e), Some(theirs_e))
+                    if ours_e.id == theirs_e.id =>
+                {
+                    merged.insert(name.clone(), ours_e.clone());
+                }
+                // Both changed differently — try recursive tree merge or conflict.
+                (Some(_base_e), Some(ours_e), Some(theirs_e))
+                    if ours_e.kind == EntryKind::Directory
+                        && theirs_e.kind == EntryKind::Directory =>
+                {
+                    let base_sub = _base_e.id;
+                    let sub_id = self.merge_trees(
+                        &base_sub, &ours_e.id, &theirs_e.id,
+                        conflicts, path,
+                    )?;
+                    merged.insert(name.clone(), TreeEntry {
+                        id: sub_id,
+                        kind: EntryKind::Directory,
+                        executable: false,
+                    });
+                }
+                // Both changed files differently — conflict.
+                (Some(_), Some(_), Some(_)) => {
+                    conflicts.push(path);
+                }
+                // Added only in ours.
+                (None, Some(ours_e), None) => {
+                    merged.insert(name.clone(), ours_e.clone());
+                }
+                // Added only in theirs.
+                (None, None, Some(theirs_e)) => {
+                    merged.insert(name.clone(), theirs_e.clone());
+                }
+                // Added in both with same content — take either.
+                (None, Some(ours_e), Some(theirs_e))
+                    if ours_e.id == theirs_e.id =>
+                {
+                    merged.insert(name.clone(), ours_e.clone());
+                }
+                // Added in both differently — conflict.
+                (None, Some(_), Some(_)) => {
+                    conflicts.push(path);
+                }
+                // Deleted in ours, unchanged in theirs — delete.
+                (Some(base_e), None, Some(theirs_e))
+                    if theirs_e.id == base_e.id =>
+                {
+                    // Omit from merged (deleted).
+                }
+                // Deleted in theirs, unchanged in ours — delete.
+                (Some(base_e), Some(ours_e), None)
+                    if ours_e.id == base_e.id =>
+                {
+                    // Omit from merged (deleted).
+                }
+                // Deleted in one but modified in other — conflict.
+                (Some(_), None, Some(_)) | (Some(_), Some(_), None) => {
+                    conflicts.push(path);
+                }
+                // Deleted in both — omit.
+                (Some(_), None, None) => {}
+                // Impossible: not in base, not in either side.
+                (None, None, None) => {}
+            }
+        }
+
+        let tree = Object::Tree(Tree { entries: merged });
+        self.put_object(&tree)
+    }
+
+    /// Get the entries of a tree object (empty map for ZERO id).
+    fn tree_entries(&self, tree_id: &ObjectId) -> Result<BTreeMap<String, TreeEntry>> {
+        if *tree_id == ObjectId::ZERO {
+            return Ok(BTreeMap::new());
+        }
+        match self.get_object(tree_id)? {
+            Some(Object::Tree(t)) => Ok(t.entries),
+            _ => Ok(BTreeMap::new()),
+        }
+    }
+
+    // ── Remote config ──────────────────────────────────────────────
+
+    /// Add a remote.
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        let key = format!("remote.{}.url", name);
+        if self.backend.get_config(&key)?.is_some() {
+            bail!("remote '{}' already exists", name);
+        }
+        self.backend.set_config(&key, url)
+    }
+
+    /// Remove a remote and its associated config (URL, token, etc.).
+    pub fn remove_remote(&self, name: &str) -> Result<()> {
+        let url_key = format!("remote.{}.url", name);
+        if self.backend.get_config(&url_key)?.is_none() {
+            bail!("remote '{}' not found", name);
+        }
+        self.backend.delete_config(&url_key)?;
+        // Also clean up associated config (e.g., token).
+        let token_key = format!("remote.{}.token", name);
+        self.backend.delete_config(&token_key)?;
+        Ok(())
+    }
+
+    /// Get a remote URL.
+    pub fn get_remote_url(&self, name: &str) -> Result<Option<String>> {
+        let key = format!("remote.{}.url", name);
+        self.backend.get_config(&key)
+    }
+
+    /// List all remotes as `(name, url)` pairs.
+    pub fn list_remotes(&self) -> Result<Vec<(String, String)>> {
+        let entries = self.backend.list_config_prefix("remote.")?;
+        let mut remotes = Vec::new();
+        for (key, url) in entries {
+            // key is "<name>.url" (prefix "remote." already stripped)
+            if let Some(name) = key.strip_suffix(".url") {
+                if !url.is_empty() {
+                    remotes.push((name.to_string(), url));
+                }
+            }
+        }
+        Ok(remotes)
+    }
+
+    // ── Stash ────────────────────────────────────────────────────────
+
+    /// Stash the current working tree changes. Returns the stash index.
+    pub fn stash_save(&self, message: &str) -> Result<usize> {
+        let status = self.status()?;
+        if status.is_clean() {
+            bail!("nothing to stash");
+        }
+
+        // Snapshot the current working tree.
+        let tree_id = self.snapshot_tree(&self.root)?;
+        let head_id = self.resolve_head()?;
+
+        let author = self.local_identity()?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock before UNIX epoch")?
+            .as_micros() as i64;
+
+        let changeset = Changeset {
+            parents: head_id.into_iter().collect(),
+            tree: tree_id,
+            author,
+            timestamp,
+            message: if message.is_empty() {
+                "WIP on stash".to_string()
+            } else {
+                message.to_string()
+            },
+            intent: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let cs_id = self.put_object(&Object::Changeset(changeset))?;
+
+        // Allocate the next stash index atomically via CAS loop.
+        // If two concurrent stash_save() calls pick the same index,
+        // cas_ref(expected=None) fails for the loser, who retries.
+        let next_idx = loop {
+            let stash_refs = self.backend.list_refs("refs/stash/")?;
+            let idx = stash_refs.iter()
+                .filter_map(|(name, _)| name.strip_prefix("refs/stash/")?.parse::<usize>().ok())
+                .max()
+                .map(|n| n + 1)
+                .unwrap_or(0);
+
+            let ref_name = format!("refs/stash/{}", idx);
+            if self.backend.cas_ref(&ref_name, None, &Ref::Direct(cs_id))? {
+                break idx;
+            }
+            // CAS failed — another writer claimed this index. Retry.
+        };
+
+        // Restore working tree to HEAD.
+        if let Some(head) = head_id {
+            if let Some(Object::Changeset(cs)) = self.get_object(&head)? {
+                self.force_checkout_tree(&cs.tree)?;
+            }
+        }
+
+        Ok(next_idx)
+    }
+
+    /// Pop the most recent stash entry and restore it to the working tree.
+    pub fn stash_pop(&self) -> Result<ObjectId> {
+        let stash_refs = self.backend.list_refs("refs/stash/")?;
+        let latest = stash_refs.iter()
+            .filter_map(|(name, _)| {
+                let idx = name.strip_prefix("refs/stash/")?.parse::<usize>().ok()?;
+                Some((idx, name.clone()))
+            })
+            .max_by_key(|(idx, _)| *idx);
+
+        let (_, ref_name) = latest
+            .ok_or_else(|| anyhow::anyhow!("no stash entries"))?;
+
+        let cs_id = self.resolve_ref(&ref_name)?
+            .ok_or_else(|| anyhow::anyhow!("stash ref broken"))?;
+
+        if let Some(Object::Changeset(cs)) = self.get_object(&cs_id)? {
+            self.force_checkout_tree(&cs.tree)?;
+        }
+
+        self.backend.delete_ref(&ref_name)?;
+        Ok(cs_id)
+    }
+
+    /// List stash entries (index, message).
+    pub fn stash_list(&self) -> Result<Vec<(usize, String)>> {
+        let stash_refs = self.backend.list_refs("refs/stash/")?;
+        let mut entries = Vec::new();
+        for (name, _) in &stash_refs {
+            if let Some(idx_str) = name.strip_prefix("refs/stash/") {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    let cs_id = self.resolve_ref(name)?;
+                    let msg = if let Some(id) = cs_id {
+                        if let Some(Object::Changeset(cs)) = self.get_object(&id)? {
+                            cs.message
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    entries.push((idx, msg));
+                }
+            }
+        }
+        entries.sort_by_key(|(idx, _)| *idx);
+        Ok(entries)
+    }
+
+    // ── Reset ────────────────────────────────────────────────────────
+
+    /// Reset HEAD to a specific changeset. Modes:
+    /// - soft: only move the ref, keep working tree
+    /// - hard: move ref and restore working tree
+    pub fn reset(&self, target: &ObjectId, hard: bool) -> Result<()> {
+        // Verify target is a changeset.
+        match self.get_object(target)? {
+            Some(Object::Changeset(cs)) => {
+                // Reset is intentionally force — the user asked to move HEAD.
+                self.update_head_force(target)?;
+                if hard {
+                    self.force_checkout_tree(&cs.tree)?;
+                }
+                Ok(())
+            }
+            _ => bail!("target {} is not a changeset", target),
+        }
+    }
+
     // ── Internals ───────────────────────────────────────────────────
 
     /// Recursively snapshot a directory into Blob and Tree objects.
@@ -807,9 +1396,26 @@ impl Repository {
         }
         // Check .forgeignore at the repo root.
         if let Ok(patterns) = self.forgeignore_patterns() {
+            let rel = if dir == self.root {
+                name.to_string()
+            } else {
+                let prefix = dir.strip_prefix(&self.root).unwrap_or(dir.as_ref());
+                format!("{}/{}", prefix.display(), name)
+            };
             for pattern in &patterns {
-                if pattern == name {
-                    return true;
+                // Trailing / means directory-only — we match against name regardless
+                // since we don't know entry type here; the caller skips non-dirs.
+                let pat = pattern.strip_suffix('/').unwrap_or(pattern);
+                // If pattern contains /, match against the relative path.
+                if pat.contains('/') {
+                    if glob_match(pat, &rel) {
+                        return true;
+                    }
+                } else {
+                    // Match against just the filename component.
+                    if glob_match(pat, name) {
+                        return true;
+                    }
                 }
             }
         }
@@ -967,5 +1573,42 @@ fn scope_covers(granted: &CapabilityScope, required: &CapabilityScope) -> bool {
             }
             _ => false,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn glob_exact() {
+        assert!(glob_match("foo.txt", "foo.txt"));
+        assert!(!glob_match("foo.txt", "bar.txt"));
+    }
+
+    #[test]
+    fn glob_star_extension() {
+        assert!(glob_match("*.o", "main.o"));
+        assert!(glob_match("*.o", ".o"));
+        assert!(!glob_match("*.o", "main.c"));
+        assert!(glob_match("*.log", "server.log"));
+    }
+
+    #[test]
+    fn glob_star_prefix() {
+        assert!(glob_match("test_*", "test_foo"));
+        assert!(!glob_match("test_*", "main_foo"));
+    }
+
+    #[test]
+    fn glob_question_mark() {
+        assert!(glob_match("?.txt", "a.txt"));
+        assert!(!glob_match("?.txt", "ab.txt"));
+    }
+
+    #[test]
+    fn glob_star_does_not_cross_slash() {
+        assert!(!glob_match("*.o", "build/main.o"));
+        assert!(glob_match("build/*.o", "build/main.o"));
     }
 }

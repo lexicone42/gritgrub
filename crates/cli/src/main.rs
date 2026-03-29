@@ -39,6 +39,12 @@ enum Commands {
         /// Maximum entries to show
         #[arg(short = 'n', long, default_value = "10")]
         count: usize,
+        /// Show ASCII branch graph
+        #[arg(long)]
+        graph: bool,
+        /// One-line compact format
+        #[arg(long)]
+        oneline: bool,
     },
 
     /// Show working directory status
@@ -67,10 +73,13 @@ enum Commands {
         id: Option<String>,
     },
 
-    /// List or create branches
+    /// List, create, or delete branches
     Branch {
-        /// Branch name to create (omit to list)
+        /// Branch name to create or delete (omit to list)
         name: Option<String>,
+        /// Delete the named branch
+        #[arg(short = 'd', long)]
+        delete: bool,
     },
 
     /// Switch branches or detach HEAD at a changeset
@@ -118,11 +127,84 @@ enum Commands {
         slsa: Option<String>,
     },
 
-    /// Start the gRPC server
+    /// Stash working tree changes
+    Stash {
+        #[command(subcommand)]
+        action: StashAction,
+    },
+
+    /// Reset HEAD to a previous changeset
+    Reset {
+        /// Changeset ID or prefix
+        target: String,
+        /// Also update working tree (destructive)
+        #[arg(long)]
+        hard: bool,
+    },
+
+    /// Merge a branch into the current branch
+    Merge {
+        /// Branch name to merge
+        branch: String,
+    },
+
+    /// Manage remote repositories
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
+
+    /// List, create, or delete tags
+    Tag {
+        /// Tag name (omit to list)
+        name: Option<String>,
+        /// Delete the named tag
+        #[arg(short = 'd', long)]
+        delete: bool,
+    },
+
+    /// Get or set repository config values
+    Config {
+        /// Config key (e.g., remote.origin.token)
+        key: String,
+        /// Value to set (omit to read)
+        value: Option<String>,
+    },
+
+    /// Push changesets to a remote server
+    Push {
+        /// Remote name (default: origin)
+        remote: Option<String>,
+    },
+
+    /// Pull changesets from a remote server
+    Pull {
+        /// Remote name (default: origin)
+        remote: Option<String>,
+    },
+
+    /// Clone a remote repository
+    Clone {
+        /// Remote server URL (e.g., http://[::1]:50051)
+        url: String,
+        /// Local directory (default: derived from URL)
+        path: Option<String>,
+    },
+
+    /// Multi-agent collaboration
+    Collab {
+        #[command(subcommand)]
+        action: CollabAction,
+    },
+
+    /// Start the gRPC + HTTP server
     Serve {
         /// Override gRPC listen address
         #[arg(long)]
         addr: Option<String>,
+        /// Enable HTTP/JSON gateway on this address (e.g., localhost:8080)
+        #[arg(long)]
+        http_addr: Option<String>,
         /// Path to server config TOML (default: .forge/server.toml)
         #[arg(long)]
         config: Option<String>,
@@ -237,6 +319,66 @@ enum SbomAction {
 }
 
 #[derive(Subcommand)]
+enum RemoteAction {
+    /// Add a remote
+    Add {
+        /// Remote name
+        name: String,
+        /// Remote URL (gRPC address)
+        url: String,
+    },
+    /// Remove a remote
+    Remove {
+        /// Remote name
+        name: String,
+    },
+    /// List configured remotes
+    List,
+}
+
+#[derive(Subcommand)]
+enum StashAction {
+    /// Save working directory changes
+    Save {
+        /// Optional message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Apply and remove the latest stash
+    Pop,
+    /// List stash entries
+    List,
+}
+
+#[derive(Subcommand)]
+enum CollabAction {
+    /// Spawn an agent on a new branch with a task
+    Spawn {
+        /// Task description
+        #[arg(long)]
+        task: String,
+        /// Branch name (auto-generated if omitted)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Agent runtime (default: claude-code)
+        #[arg(long)]
+        runtime: Option<String>,
+    },
+    /// List active agent collaborations
+    List,
+    /// Review an agent's work
+    Review {
+        /// Branch name to review
+        branch: String,
+    },
+    /// Mark a collaboration as completed
+    Complete {
+        /// Branch name
+        branch: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentAction {
     /// Write a scratchpad entry
     Write {
@@ -265,7 +407,7 @@ fn main() -> Result<()> {
         Commands::Commit { message, intent, rationale } => {
             commands::commit::run(&message, intent.as_deref(), rationale.as_deref())
         }
-        Commands::Log { count } => commands::log::run(count),
+        Commands::Log { count, graph, oneline } => commands::log::run(count, graph, oneline),
         Commands::Status => commands::status::run(),
         Commands::ImportGit => commands::import_git::run(),
         Commands::Cat { id } => commands::cat::run(&id),
@@ -273,7 +415,7 @@ fn main() -> Result<()> {
             commands::diff::run(from.as_deref(), to.as_deref())
         }
         Commands::Show { id } => commands::show::run(id.as_deref()),
-        Commands::Branch { name } => commands::branch::run(name.as_deref()),
+        Commands::Branch { name, delete } => commands::branch::run(name.as_deref(), delete),
         Commands::Checkout { target, create } => {
             commands::checkout::run(&target, create)
         }
@@ -324,8 +466,36 @@ fn main() -> Result<()> {
         Commands::Verify { id, slsa } => {
             commands::verify::run(id.as_deref(), slsa.as_deref())
         }
-        Commands::Serve { addr, config, init_config } => {
-            commands::serve::run(addr.as_deref(), config.as_deref(), init_config)
+        Commands::Config { key, value } => match value {
+            Some(val) => commands::config::set(&key, &val),
+            None => commands::config::get(&key),
+        },
+        Commands::Tag { name, delete } => commands::tag::run(name.as_deref(), delete),
+        Commands::Push { remote } => commands::push::run(remote.as_deref()),
+        Commands::Pull { remote } => commands::pull::run(remote.as_deref()),
+        Commands::Clone { url, path } => commands::clone::run(&url, path.as_deref()),
+        Commands::Merge { branch } => commands::merge::run(&branch),
+        Commands::Remote { action } => match action {
+            RemoteAction::Add { name, url } => commands::remote::add(&name, &url),
+            RemoteAction::Remove { name } => commands::remote::remove(&name),
+            RemoteAction::List => commands::remote::list(),
+        },
+        Commands::Collab { action } => match action {
+            CollabAction::Spawn { task, branch, runtime } => {
+                commands::collab::spawn(&task, branch.as_deref(), runtime.as_deref())
+            }
+            CollabAction::List => commands::collab::list(),
+            CollabAction::Review { branch } => commands::collab::review(&branch),
+            CollabAction::Complete { branch } => commands::collab::complete(&branch),
+        },
+        Commands::Stash { action } => match action {
+            StashAction::Save { message } => commands::stash::save(message.as_deref()),
+            StashAction::Pop => commands::stash::pop(),
+            StashAction::List => commands::stash::list(),
+        },
+        Commands::Reset { target, hard } => commands::reset::run(&target, hard),
+        Commands::Serve { addr, http_addr, config, init_config } => {
+            commands::serve::run(addr.as_deref(), http_addr.as_deref(), config.as_deref(), init_config)
         }
     }
 }

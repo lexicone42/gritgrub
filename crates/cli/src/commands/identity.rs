@@ -120,7 +120,7 @@ pub fn gen_token(id_str: Option<&str>, expiry_hours: u64, scope_str: &str) -> Re
     } else {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|_| anyhow::anyhow!("system clock before UNIX epoch"))?
             .as_micros() as i64;
         now + (expiry_hours as i64 * 3_600_000_000)
     };

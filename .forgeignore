@@ -1,0 +1,33 @@
+# forge ignore — files excluded from changesets
+
+# Build artifacts
+target/
+build/
+dist/
+*.o
+*.so
+*.dylib
+
+# Dependencies
+node_modules/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Fuzz corpus (auto-generated)
+crates/core/fuzz/corpus/
+crates/core/fuzz/artifacts/

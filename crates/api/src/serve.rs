@@ -1,4 +1,4 @@
-//! Server assembly — builds and runs the complete gRPC server.
+//! Server assembly — builds and runs the complete gRPC + HTTP server.
 //!
 //! Owns all cloud-ready concerns: TLS, health checks, reflection,
 //! rate limiting, keepalive tuning, and graceful shutdown.
@@ -13,6 +13,7 @@ use crate::attestation_service::AttestationServer;
 use crate::event_service::{EventServer, EventBroadcaster};
 use crate::auth::auth_interceptor;
 use crate::rate_limit::RateLimiter;
+use crate::http_gateway;
 
 /// File descriptor set for gRPC reflection.
 const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("gritgrub_descriptor");
@@ -29,9 +30,6 @@ impl ForgeServer {
     /// The broadcaster is initialized immediately and is live from creation (SE-13).
     pub fn new(config: ServerConfig, repo: Arc<Repository>) -> Self {
         let (_event_server_unused, broadcaster) = EventServer::with_repo(repo.clone());
-        // We don't store event_server here — run() will create a fresh one
-        // that shares the same repo. The broadcaster IS connected to this repo.
-        // TODO: refactor so run() reuses this broadcaster's EventServer.
         Self {
             config,
             repo,
@@ -46,8 +44,7 @@ impl ForgeServer {
 
     /// Run the server, blocking until shutdown signal.
     pub async fn run(self) -> anyhow::Result<()> {
-        let grpc_addr = self.config.listen.grpc_addr.parse()
-            .map_err(|e| anyhow::anyhow!("invalid gRPC address '{}': {}", self.config.listen.grpc_addr, e))?;
+        let grpc_addr = resolve_addr(&self.config.listen.grpc_addr)?;
 
         // accept_http1 enables grpc-web (HTTP/1.1) alongside native gRPC (HTTP/2).
         let mut builder = Server::builder().accept_http1(true);
@@ -87,24 +84,23 @@ impl ForgeServer {
             );
         }
 
-        // ── Message size (SE-8) ──────────────────────────────────────
-        if self.config.limits.max_message_size > 0 {
-            builder = builder
-                .max_frame_size(Some(self.config.limits.max_message_size as u32));
-        }
-
         // ── Services ─────────────────────────────────────────────────
-        let repo_server = RepoServer::new(self.repo.clone());
-        let attest_server = AttestationServer::new(self.repo.clone());
-        let (event_server, _broadcaster) = EventServer::with_repo(self.repo.clone());
-
         let rate_limiter = RateLimiter::new(
             self.config.limits.default_rate_limit_ops,
             self.config.limits.default_rate_limit_window_secs,
         );
+
+        let repo_server = RepoServer::new(self.repo.clone())
+            .with_limits(
+                self.config.limits.max_message_size,
+                self.config.auth.require_auth_for_reads,
+            );
+        let attest_server = AttestationServer::new(self.repo.clone());
+        let (event_server, _broadcaster) = EventServer::with_repo(self.repo.clone());
+
         let interceptor = auth_interceptor(
             self.repo.clone(),
-            rate_limiter,
+            rate_limiter.clone(),
             self.config.auth.require_auth_for_reads,
             self.config.auth.max_token_lifetime_hours,
         );
@@ -138,22 +134,42 @@ impl ForgeServer {
             eprintln!("  WARNING: TLS is disabled — bearer tokens will be sent in plaintext!");
             eprintln!("  WARNING: Enable TLS for production use (see forge serve --init-config)");
         }
-        println!("  RepoService         objects, refs, changesets, identity");
+        println!("  gRPC                 {}", grpc_addr);
+        println!("  RepoService          objects, refs, changesets, identity");
         println!("  AttestationService   create, list, verify, SLSA check");
         println!("  EventService         subscribe to repo events");
-        println!("  grpc.health.v1       health checks");
-        println!("  grpc.reflection.v1   service reflection");
         println!("  grpc-web             HTTP/1.1 browser clients");
+
+        // ── HTTP/JSON gateway ────────────────────────────────────────
+        let http_handle = if !self.config.listen.http_addr.is_empty() {
+            let http_addr = resolve_addr(&self.config.listen.http_addr)?;
+            let http_state = http_gateway::HttpState {
+                repo: self.repo.clone(),
+                rate_limiter: rate_limiter.clone(),
+                require_auth_for_reads: self.config.auth.require_auth_for_reads,
+                max_token_lifetime_hours: self.config.auth.max_token_lifetime_hours,
+                max_object_size: self.config.limits.max_message_size,
+            };
+            let app = http_gateway::router(http_state);
+            let listener = tokio::net::TcpListener::bind(http_addr).await
+                .map_err(|e| anyhow::anyhow!("HTTP bind '{}': {}", http_addr, e))?;
+            println!("  HTTP/JSON            http://{}/api/v1/", http_addr);
+            Some(tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            }))
+        } else {
+            None
+        };
+
         println!();
         println!("  Rate limit: {}", rate_label);
-        println!("  Auth: Bearer token in 'authorization' metadata");
+        println!("  Auth: Bearer token in 'authorization' header");
         println!("  Generate: forge identity token");
 
         // ── Shutdown ─────────────────────────────────────────────────
         let shutdown = graceful_shutdown();
 
-        // ── Serve ────────────────────────────────────────────────────
-        // Wrap services with tonic-web for grpc-web (HTTP/1.1) support.
+        // ── Serve gRPC ───────────────────────────────────────────────
         builder
             .layer(tonic::service::interceptor(interceptor))
             .add_service(health_service)
@@ -163,8 +179,29 @@ impl ForgeServer {
             .add_service(tonic_web::enable(event_server.into_service()))
             .serve_with_shutdown(grpc_addr, shutdown)
             .await
-            .map_err(|e| anyhow::anyhow!("server error: {}", e))
+            .map_err(|e| anyhow::anyhow!("server error: {}", e))?;
+
+        // Clean up HTTP task.
+        if let Some(handle) = http_handle {
+            handle.abort();
+        }
+
+        Ok(())
     }
+}
+
+/// Resolve an address string like "localhost:50051" to a SocketAddr.
+/// Accepts both IP:port ("127.0.0.1:50051", "[::1]:50051") and hostname:port ("localhost:50051").
+fn resolve_addr(addr: &str) -> anyhow::Result<std::net::SocketAddr> {
+    // Try parsing directly as a SocketAddr first (handles IP:port).
+    if let Ok(sa) = addr.parse() {
+        return Ok(sa);
+    }
+    // Otherwise resolve as hostname:port.
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve address '{}'", addr))
 }
 
 /// Wait for SIGINT or SIGTERM.

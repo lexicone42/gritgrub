@@ -18,3 +18,7 @@ gritgrub-api = { path = "../api" }
 tonic = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+portpicker = "0.1"

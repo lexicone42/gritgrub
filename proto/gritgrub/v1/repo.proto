@@ -25,6 +25,16 @@ service RepoService {
   // Identity
   rpc CreateIdentity(CreateIdentityRequest) returns (CreateIdentityResponse);
   rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
+
+  // Sync — push/pull primitives for multi-repo collaboration.
+  // CAS ref update: atomic compare-and-swap for lock-free concurrent updates.
+  rpc CasRef(CasRefRequest) returns (CasRefResponse);
+  // Bulk object transfer: send objects the remote is missing.
+  rpc PushObjects(stream PushObjectChunk) returns (PushObjectsResponse);
+  // Bulk object fetch: request objects we're missing.
+  rpc FetchObjects(FetchObjectsRequest) returns (stream FetchObjectChunk);
+  // Negotiate: find which objects the remote needs or has.
+  rpc NegotiateRefs(NegotiateRefsRequest) returns (NegotiateRefsResponse);
 }
 
 // ── Object store ────────────────────────────────────────────────────
@@ -114,3 +124,42 @@ message CreateIdentityResponse { Identity identity = 1; }
 
 message GetIdentityRequest { IdentityId id = 1; }
 message GetIdentityResponse { Identity identity = 1; }
+
+// ── Sync ────────────────────────────────────────────────────────────
+
+message CasRefRequest {
+  string name = 1;
+  optional RefValue expected = 2;  // None = expect ref to not exist
+  RefValue new_value = 3;
+}
+message CasRefResponse {
+  bool success = 1;
+  optional RefValue current = 2;  // current value if CAS failed
+}
+
+message PushObjectChunk {
+  // Tagged bytes (type byte + postcard-serialized body).
+  bytes data = 1;
+}
+message PushObjectsResponse {
+  uint32 received = 1;
+}
+
+message FetchObjectsRequest {
+  // Object IDs the client wants.
+  repeated ObjectId want = 1;
+  // Object IDs the client already has (so the server can skip ancestors).
+  repeated ObjectId have = 2;
+}
+message FetchObjectChunk {
+  ObjectId id = 1;
+  bytes data = 2;  // tagged bytes
+}
+
+message NegotiateRefsRequest {
+  // Client sends its ref state; server responds with what it has.
+  repeated RefEntry client_refs = 1;
+}
+message NegotiateRefsResponse {
+  repeated RefEntry server_refs = 1;
+}

@@ -1,19 +1,43 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tokio_stream::StreamExt;
 use gritgrub_core::*;
 use gritgrub_store::Repository;
 use crate::pb;
 use crate::pb::repo_service_server::RepoService;
-use crate::auth::{require_scope, require_auth_with_scopes};
+use crate::auth::{require_scope, require_auth_with_scopes, optional_auth};
+
+/// Default max object size: 128 MB.
+const DEFAULT_MAX_OBJECT_SIZE: usize = 128 * 1024 * 1024;
+
+/// Hard cap on log entries to prevent OOM from unbounded queries.
+const MAX_LOG_ENTRIES: usize = 10_000;
 
 pub struct RepoServer {
     pub(crate) repo: Arc<Repository>,
+    /// Maximum single object size in bytes (prevents disk exhaustion).
+    max_object_size: usize,
+    /// Whether reads require authentication.
+    require_auth_for_reads: bool,
 }
 
 impl RepoServer {
     pub fn new(repo: Arc<Repository>) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            max_object_size: DEFAULT_MAX_OBJECT_SIZE,
+            require_auth_for_reads: false,
+        }
+    }
+
+    /// Configure the max object size and auth requirements.
+    pub fn with_limits(mut self, max_object_size: usize, require_auth_for_reads: bool) -> Self {
+        if max_object_size > 0 {
+            self.max_object_size = max_object_size;
+        }
+        self.require_auth_for_reads = require_auth_for_reads;
+        self
     }
 
     pub fn into_service(self) -> pb::repo_service_server::RepoServiceServer<Self> {
@@ -244,7 +268,7 @@ impl RepoService for RepoServer {
             .collect::<Result<Vec<_>, _>>()?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|_| Status::internal("system clock before UNIX epoch"))?
             .as_micros() as i64;
 
         let intent = req.intent.map(|i| intent_from_pb(&i));
@@ -287,7 +311,7 @@ impl RepoService for RepoServer {
         request: Request<pb::LogRequest>,
     ) -> Result<Response<Self::LogStream>, Status> {
         let req = request.into_inner();
-        let max_count = if req.max_count == 0 { 100 } else { req.max_count as usize };
+        let max_count = if req.max_count == 0 { 100 } else { (req.max_count as usize).min(MAX_LOG_ENTRIES) };
 
         let entries = self.repo.log(max_count).map_err(to_status)?;
 
@@ -339,6 +363,168 @@ impl RepoService for RepoServer {
             })),
             None => Err(Status::not_found("identity not found")),
         }
+    }
+
+    // ── Sync RPCs ─────────────────────────────────────────────────────
+
+    async fn cas_ref(
+        &self,
+        request: Request<pb::CasRefRequest>,
+    ) -> Result<Response<pb::CasRefResponse>, Status> {
+        let auth = require_auth_with_scopes(&request)?.clone();
+        if !auth.scopes.allows_write() {
+            return Err(Status::permission_denied("token lacks 'write' scope"));
+        }
+        let req = request.into_inner();
+
+        if !auth.scopes.allows_ref(&req.name) {
+            return Err(Status::permission_denied(format!(
+                "token lacks scope for ref '{}'", req.name
+            )));
+        }
+
+        let expected = match req.expected.and_then(|v| v.value) {
+            Some(pb::ref_value::Value::Direct(id)) => Some(Ref::Direct(from_pb_object_id(&id)?)),
+            Some(pb::ref_value::Value::Symbolic(t)) => Some(Ref::Symbolic(t)),
+            None => None,
+        };
+
+        let new_ref = match req.new_value.and_then(|v| v.value) {
+            Some(pb::ref_value::Value::Direct(id)) => Ref::Direct(from_pb_object_id(&id)?),
+            Some(pb::ref_value::Value::Symbolic(t)) => Ref::Symbolic(t),
+            None => return Err(Status::invalid_argument("missing new_value")),
+        };
+
+        let success = self.repo.cas_ref(&req.name, expected.as_ref(), &new_ref)
+            .map_err(to_status)?;
+
+        let current = if !success {
+            // Return current value so caller can retry.
+            let refs = self.repo.list_refs("").map_err(to_status)?;
+            refs.into_iter()
+                .find(|(n, _)| *n == req.name)
+                .map(|(_, r)| ref_to_pb(&r))
+        } else {
+            None
+        };
+
+        Ok(Response::new(pb::CasRefResponse { success, current }))
+    }
+
+    async fn push_objects(
+        &self,
+        request: Request<tonic::Streaming<pb::PushObjectChunk>>,
+    ) -> Result<Response<pb::PushObjectsResponse>, Status> {
+        // #1: push_objects requires write scope.
+        require_scope(&request, |s| s.allows_write(), "write")?;
+
+        let mut stream = request.into_inner();
+        let mut received = 0u32;
+        let max_size = self.max_object_size;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.data.is_empty() {
+                continue;
+            }
+            // #3: enforce object size limit.
+            if chunk.data.len() > max_size {
+                return Err(Status::invalid_argument(format!(
+                    "object too large: {} bytes (max {})",
+                    chunk.data.len(), max_size
+                )));
+            }
+            let obj = Object::from_tagged_bytes(&chunk.data)
+                .map_err(|e| Status::invalid_argument(format!("invalid object: {}", e)))?;
+            self.repo.put_object(&obj).map_err(to_status)?;
+            received += 1;
+        }
+
+        Ok(Response::new(pb::PushObjectsResponse { received }))
+    }
+
+    type FetchObjectsStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FetchObjectChunk, Status>>;
+
+    async fn fetch_objects(
+        &self,
+        request: Request<pb::FetchObjectsRequest>,
+    ) -> Result<Response<Self::FetchObjectsStream>, Status> {
+        // #2: fetch_objects respects require_auth_for_reads.
+        if self.require_auth_for_reads {
+            optional_auth(&request)
+                .ok_or_else(|| Status::unauthenticated("authentication required for reads"))?;
+        }
+
+        let req = request.into_inner();
+        let repo = self.repo.clone();
+
+        let want_ids: Vec<ObjectId> = req.want.iter()
+            .map(from_pb_object_id)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let have_ids: std::collections::HashSet<ObjectId> = req.have.iter()
+            .map(from_pb_object_id)
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        tokio::spawn(async move {
+            // Walk from each wanted object, sending everything the client doesn't have.
+            let mut sent = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::from_iter(want_ids);
+
+            while let Some(id) = queue.pop_front() {
+                if have_ids.contains(&id) || !sent.insert(id) {
+                    continue;
+                }
+                match repo.get_object(&id) {
+                    Ok(Some(obj)) => {
+                        // If it's a changeset, enqueue parents and tree.
+                        if let Object::Changeset(ref cs) = obj {
+                            queue.extend(cs.parents.iter().copied());
+                            queue.push_back(cs.tree);
+                        }
+                        // If it's a tree, enqueue child objects.
+                        if let Object::Tree(ref tree) = obj {
+                            for entry in tree.entries.values() {
+                                queue.push_back(entry.id);
+                            }
+                        }
+
+                        let data = obj.to_tagged_bytes();
+                        let chunk = pb::FetchObjectChunk {
+                            id: Some(to_pb_object_id(&id)),
+                            data,
+                        };
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {} // Object not found, skip.
+                    Err(e) => {
+                        let _ = tx.send(Err(to_status(e))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn negotiate_refs(
+        &self,
+        _request: Request<pb::NegotiateRefsRequest>,
+    ) -> Result<Response<pb::NegotiateRefsResponse>, Status> {
+        // Return all server refs so the client can determine what to fetch/push.
+        let refs = self.repo.list_refs("").map_err(to_status)?;
+        let entries: Vec<pb::RefEntry> = refs.into_iter().map(|(name, reference)| {
+            pb::RefEntry {
+                name,
+                value: Some(ref_to_pb(&reference)),
+            }
+        }).collect();
+        Ok(Response::new(pb::NegotiateRefsResponse { server_refs: entries }))
     }
 }
 
@@ -406,6 +592,17 @@ fn intent_from_pb(pb: &pb::Intent) -> Intent {
             from_pb_object_id(id).ok()
         }),
         verifications: vec![],
+    }
+}
+
+fn ref_to_pb(r: &Ref) -> pb::RefValue {
+    match r {
+        Ref::Direct(id) => pb::RefValue {
+            value: Some(pb::ref_value::Value::Direct(to_pb_object_id(id))),
+        },
+        Ref::Symbolic(target) => pb::RefValue {
+            value: Some(pb::ref_value::Value::Symbolic(target.clone())),
+        },
     }
 }
 

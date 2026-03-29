@@ -99,7 +99,7 @@ impl Default for ServerConfig {
 impl Default for ListenConfig {
     fn default() -> Self {
         Self {
-            grpc_addr: "[::1]:50051".into(),
+            grpc_addr: "localhost:50051".into(),
             http_addr: String::new(),
         }
     }
@@ -132,7 +132,7 @@ impl Default for LimitsConfig {
             max_concurrent_streams: 200,
             keepalive_interval_secs: 30,
             keepalive_timeout_secs: 10,
-            default_rate_limit_ops: 0,
+            default_rate_limit_ops: 100,
             default_rate_limit_window_secs: 60,
         }
     }

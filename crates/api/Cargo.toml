@@ -17,6 +17,10 @@ toml = "0.8"
 tonic-health = "0.12"
 tonic-reflection = "0.12"
 tonic-web = "0.12"
+axum = { workspace = true }
+tower = { workspace = true }
+base64 = "0.22"
+uuid = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -46,14 +46,22 @@ crates/
 cargo build --release
 
 # Initialize a repository
-forge init myproject
+forge init
 
-# Create objects
-echo "hello" | forge hash-object --type blob
+# Commit, branch, merge
+forge commit -m "initial commit"
+forge branch feature
+forge checkout feature
+forge commit -m "add feature"
+forge checkout main
+forge merge feature
 
-# Work with refs
-forge update-ref refs/heads/main <object-id>
-forge log refs/heads/main
+# Collaborate
+forge serve                                    # start gRPC server
+forge remote add origin http://[::1]:50051     # add remote
+forge push                                     # push to remote
+forge pull                                     # pull from remote
+forge clone http://remote:50051 myproject      # clone a repo
 ```
 
 ## Design Philosophy
@@ -73,6 +81,15 @@ No ambient authority. Every operation requires explicit capability grants:
 - **Scopes**: `read`, `write`, `attest`, `identity`, `ref:<pattern>`
 - **Permissions**: per-scope bitflags (read, write, create, delete, admin)
 - **Ref policies**: glob-matched rules with `require_review`, `require_slsa`, `allowed_writers`, `forbid_force_push`
+
+### Concurrent Agent Collaboration
+
+Hundreds of agents can work on the same repository simultaneously — no worktrees, no filesystem locking, no contention:
+
+- **Immutable objects**: blobs, trees, and changesets are content-addressed. Two agents writing the same blob get the same ID — zero coordination needed.
+- **Lock-free ref updates**: CAS (compare-and-swap) on branch pointers. An agent reads the current ref, does its work, then atomically swaps. If another agent updated first, the CAS fails and the agent rebases and retries.
+- **Agent namespaces**: each agent works in `refs/agents/<agent-id>/`, merging to shared branches through the normal policy engine.
+- **Server-side tree building**: agents can create blobs and trees via the gRPC API without any filesystem checkout — pure object manipulation.
 
 ### Security Hardening
 
@@ -95,9 +112,12 @@ The codebase has been through a Trail of Bits-style sharp edges analysis. Proper
 | Ed25519 signing + DSSE envelopes | Working |
 | Ref policy engine | Working |
 | Property tests + fuzz targets | Working |
-| gRPC API + auth middleware | In progress |
-| SBOM + SLSA attestation | In progress |
-| Git import/export | In progress |
+| gRPC API + auth middleware | Working |
+| Merge (three-way, fast-forward) | Working |
+| Push / Pull / Clone (gRPC sync) | Working |
+| CAS ref updates (lock-free) | Working |
+| SBOM + SLSA attestation | Working |
+| Git import/export | Working |
 | Web UI | Planned |
 
 ## License

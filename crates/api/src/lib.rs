@@ -12,9 +12,11 @@ mod server;
 mod auth;
 mod attestation_service;
 mod event_service;
+pub mod client;
 pub mod config;
 pub mod rate_limit;
 mod serve;
+pub mod http_gateway;
 
 pub use server::RepoServer;
 pub use auth::{auth_interceptor, require_auth, require_scope, optional_auth, AuthenticatedRequest};
@@ -22,3 +24,4 @@ pub use attestation_service::AttestationServer;
 pub use event_service::{EventServer, EventBroadcaster};
 pub use config::ServerConfig;
 pub use serve::ForgeServer;
+pub use client::ForgeClient;

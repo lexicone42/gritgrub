@@ -153,6 +153,29 @@ impl RefStore for RedbBackend {
         }
         Ok(refs)
     }
+
+    fn cas_ref(&self, name: &str, expected: Option<&Ref>, new: &Ref) -> Result<bool> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(REFS)?;
+            let current = match table.get(name)? {
+                Some(data) => Some(postcard::from_bytes::<Ref>(data.value())?),
+                None => None,
+            };
+
+            // Check expectation.
+            match (&current, expected) {
+                (None, None) => {} // Expected empty, is empty — proceed.
+                (Some(cur), Some(exp)) if cur == exp => {} // Matches — proceed.
+                _ => return Ok(false), // Mismatch — CAS failed.
+            }
+
+            let bytes = postcard::to_allocvec(new)?;
+            table.insert(name, bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
 }
 
 // ── ConfigStore ────────────────────────────────────────────────────
@@ -179,6 +202,35 @@ impl ConfigStore for RedbBackend {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    fn delete_config(&self, key: &str) -> Result<bool> {
+        let tx = self.db.begin_write()?;
+        let existed = {
+            let mut table = tx.open_table(CONFIG)?;
+            table.remove(key)?.is_some()
+        };
+        tx.commit()?;
+        Ok(existed)
+    }
+
+    fn list_config_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let tx = self.db.begin_read()?;
+        let table = match tx.open_table(CONFIG) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut results = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let k = key.value();
+            if k.starts_with(prefix) {
+                let stripped = &k[prefix.len()..];
+                results.push((stripped.to_string(), value.value().to_string()));
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -253,6 +305,33 @@ impl IdentityStore for RedbBackend {
             }
             None => Ok(vec![]),
         }
+    }
+}
+
+// ── Atomic compound operations ────────────────────────────────────
+//
+// These methods perform read-modify-write in a single write transaction,
+// preventing lost-update races that occur when read and write use
+// separate transactions.
+
+impl RedbBackend {
+    /// Atomically read + extend + write capabilities in one write transaction.
+    /// Prevents the race where two concurrent grants read the same state and
+    /// one overwrites the other's additions.
+    pub fn atomic_grant_capabilities(&self, id: &IdentityId, new_caps: &[Capability]) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut table = tx.open_table(CAPABILITIES)?;
+            let mut caps: Vec<Capability> = match table.get(id.as_bytes().as_slice())? {
+                Some(data) => serde_json::from_slice(data.value())?,
+                None => vec![],
+            };
+            caps.extend_from_slice(new_caps);
+            let bytes = serde_json::to_vec(&caps)?;
+            table.insert(id.as_bytes().as_slice(), bytes.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 

@@ -1,9 +1,23 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use gritgrub_core::*;
 use gritgrub_store::Repository;
 
-pub fn run(name: Option<&str>) -> Result<()> {
+pub fn run(name: Option<&str>, delete: bool) -> Result<()> {
     let repo = Repository::discover(&std::env::current_dir()?)?;
+
+    if delete {
+        let branch_name = name.ok_or_else(|| anyhow::anyhow!("branch name required for -d"))?;
+        let current = repo.head_branch()?;
+        if current.as_deref() == Some(branch_name) {
+            bail!("cannot delete the current branch '{}'", branch_name);
+        }
+        let ref_name = format!("refs/heads/{}", branch_name);
+        if !repo.delete_ref(&ref_name)? {
+            bail!("branch '{}' not found", branch_name);
+        }
+        println!("Deleted branch '{}'", branch_name);
+        return Ok(());
+    }
 
     match name {
         // List branches.

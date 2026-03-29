@@ -15,12 +15,19 @@ pub trait RefStore {
     fn get_ref(&self, name: &str) -> Result<Option<Ref>>;
     fn delete_ref(&self, name: &str) -> Result<bool>;
     fn list_refs(&self, prefix: &str) -> Result<Vec<(String, Ref)>>;
+    /// Compare-and-swap: update ref only if its current value matches `expected`.
+    /// Returns Ok(true) if the swap succeeded, Ok(false) if the current value didn't match.
+    fn cas_ref(&self, name: &str, expected: Option<&Ref>, new: &Ref) -> Result<bool>;
 }
 
 /// Key-value config storage.
 pub trait ConfigStore {
     fn get_config(&self, key: &str) -> Result<Option<String>>;
     fn set_config(&self, key: &str, value: &str) -> Result<()>;
+    fn delete_config(&self, key: &str) -> Result<bool>;
+    /// List all config entries whose key starts with `prefix`.
+    /// Returns `(key, value)` pairs with the prefix stripped from the key.
+    fn list_config_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>>;
 }
 
 /// Identity storage — mutable entities, not content-addressed.

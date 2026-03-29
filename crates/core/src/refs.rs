@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use crate::id::ObjectId;
 
 /// A reference to a changeset — either direct (by ID) or symbolic (by name).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ref {
     /// Points directly to a changeset ObjectId.
     Direct(ObjectId),

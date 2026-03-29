@@ -29,7 +29,7 @@ pub fn auth_interceptor(
     move |mut req: Request<()>| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|_| Status::internal("system clock before UNIX epoch"))?
             .as_micros() as i64;
 
         let token_str = req.metadata()
