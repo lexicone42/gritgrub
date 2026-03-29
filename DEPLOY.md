@@ -10,6 +10,7 @@ cargo build --release
 # Binary at: target/release/forge
 
 # Static musl build (fully portable, no glibc dependency)
+# Requires musl-gcc: `emerge sys-libs/musl` (Gentoo) or `apt install musl-tools` (Debian)
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 # Binary at: target/x86_64-unknown-linux-musl/release/forge
