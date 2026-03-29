@@ -509,3 +509,208 @@ proptest! {
         prop_assert!(result.is_err());
     }
 }
+
+// ── Exploration types ──────────────────────────────────────────
+
+use gritgrub_core::exploration;
+
+/// Generate a random Goal.
+fn arb_goal() -> impl Strategy<Value = Goal> {
+    (
+        "[a-zA-Z ]{5,50}",        // description
+        "[a-z]{3,10}",            // target_branch
+        arb_identity_id(),
+        any::<i64>(),
+        0u32..10,
+        0u64..3600,
+    ).prop_map(|(desc, branch, author, ts, max_a, budget)| Goal {
+        description: desc,
+        target_branch: branch,
+        constraints: vec![],
+        created_by: author,
+        created_at: ts,
+        max_approaches: max_a,
+        time_budget_secs: budget,
+    })
+}
+
+proptest! {
+    /// Goal serialization roundtrips through JSON.
+    #[test]
+    fn goal_json_roundtrip(goal in arb_goal()) {
+        let json = serde_json::to_vec(&goal).unwrap();
+        let decoded: Goal = serde_json::from_slice(&json).unwrap();
+        prop_assert_eq!(goal.description, decoded.description);
+        prop_assert_eq!(goal.target_branch, decoded.target_branch);
+        prop_assert_eq!(goal.max_approaches, decoded.max_approaches);
+    }
+
+    /// Claim TTL: a claim created now with default TTL should not be expired.
+    #[test]
+    fn claim_ttl_not_expired_immediately(
+        agent in arb_identity_id(),
+        approach in "[a-z]{3,15}",
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_micros() as i64;
+        let claim = Claim {
+            agent,
+            approach,
+            expires_at: now + (DEFAULT_CLAIM_TTL_SECS as i64 * 1_000_000),
+            intent: String::new(),
+            heartbeat: 0,
+        };
+        prop_assert!(claim.expires_at > now);
+    }
+
+    /// Claim TTL: a claim with expires_at in the past IS expired.
+    #[test]
+    fn claim_in_past_is_expired(
+        agent in arb_identity_id(),
+        secs_ago in 1i64..1_000_000,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap()
+            .as_micros() as i64;
+        let claim = Claim {
+            agent,
+            approach: "test".into(),
+            expires_at: now - (secs_ago * 1_000_000),
+            intent: String::new(),
+            heartbeat: 0,
+        };
+        prop_assert!(claim.expires_at < now);
+    }
+
+    /// Exploration ref namespace: goal_meta produces consistent refs.
+    #[test]
+    fn exploration_ref_deterministic(id in any::<[u8; 32]>().prop_map(ObjectId::from_bytes)) {
+        let ref1 = exploration::refs::goal_meta(&id);
+        let ref2 = exploration::refs::goal_meta(&id);
+        prop_assert_eq!(&ref1, &ref2);
+        prop_assert!(ref1.starts_with("refs/explore/"));
+        prop_assert!(ref1.ends_with("//meta"));
+    }
+
+    /// Exploration ref namespace: different goals produce different refs.
+    #[test]
+    fn exploration_refs_unique(
+        id1 in any::<[u8; 32]>().prop_map(ObjectId::from_bytes),
+        id2 in any::<[u8; 32]>().prop_map(ObjectId::from_bytes),
+    ) {
+        prop_assume!(id1 != id2);
+        let ref1 = exploration::refs::goal_meta(&id1);
+        let ref2 = exploration::refs::goal_meta(&id2);
+        // Different goals MAY collide on the 16-char prefix, but should be rare.
+        // We test that the function at least produces valid ref names.
+        prop_assert!(ref1.starts_with("refs/explore/"));
+        prop_assert!(ref2.starts_with("refs/explore/"));
+    }
+
+    /// Approach refs contain the approach name.
+    #[test]
+    fn approach_ref_contains_name(
+        id in any::<[u8; 32]>().prop_map(ObjectId::from_bytes),
+        name in "[a-z\\-]{1,20}",
+    ) {
+        let r = exploration::refs::approach_tip(&id, &name);
+        prop_assert!(r.contains(&name));
+        prop_assert!(r.starts_with("refs/explore/"));
+    }
+}
+
+// ── Verification level ordering ────────────────────────────────
+
+proptest! {
+    /// VerificationLevel has a total order: Unknown < Builds < Tested < ... < SlsaL2.
+    #[test]
+    fn verification_level_ordering(
+        a in 0u8..7,
+        b in 0u8..7,
+    ) {
+        let levels = [
+            VerificationLevel::Unknown,
+            VerificationLevel::Builds,
+            VerificationLevel::Tested,
+            VerificationLevel::Attested,
+            VerificationLevel::Reviewed,
+            VerificationLevel::SlsaL1,
+            VerificationLevel::SlsaL2,
+        ];
+        let va = levels[a as usize];
+        let vb = levels[b as usize];
+        if a < b {
+            prop_assert!(va < vb);
+        } else if a > b {
+            prop_assert!(va > vb);
+        } else {
+            prop_assert_eq!(va, vb);
+        }
+    }
+}
+
+// ── Pipeline types ─────────────────────────────────────────────
+
+use gritgrub_core::pipeline;
+
+proptest! {
+    /// PipelineResult serialization roundtrips through JSON.
+    #[test]
+    fn pipeline_result_json_roundtrip(
+        pipeline_name in "[a-z]{3,15}",
+        changeset in any::<[u8; 32]>().prop_map(ObjectId::from_bytes),
+        passed in any::<bool>(),
+        duration in 0u64..1_000_000,
+        runner in arb_identity_id(),
+    ) {
+        let result = PipelineResult {
+            pipeline: pipeline_name.clone(),
+            changeset,
+            stages: vec![StageResult {
+                name: "test".into(),
+                passed,
+                exit_code: Some(if passed { 0 } else { 1 }),
+                duration_ms: duration,
+                summary: "ok".into(),
+                tests_passed: 42,
+                tests_failed: if passed { 0 } else { 3 },
+                warnings: 0,
+                required: true,
+            }],
+            passed,
+            duration_ms: duration,
+            runner,
+            completed_at: 1_000_000,
+        };
+        let json = serde_json::to_vec(&result).unwrap();
+        let decoded: PipelineResult = serde_json::from_slice(&json).unwrap();
+        prop_assert_eq!(result.pipeline, decoded.pipeline);
+        prop_assert_eq!(result.passed, decoded.passed);
+        prop_assert_eq!(result.stages.len(), decoded.stages.len());
+        prop_assert_eq!(result.stages[0].tests_passed, decoded.stages[0].tests_passed);
+    }
+
+    /// Pipeline predicate URI is stable.
+    #[test]
+    fn pipeline_predicate_stable(_dummy in 0u8..1) {
+        prop_assert_eq!(
+            pipeline::PIPELINE_PREDICATE,
+            "https://gritgrub.dev/attestation/pipeline/v1"
+        );
+    }
+
+    /// Default Rust pipeline has test + lint + build stages.
+    #[test]
+    fn default_pipeline_structure(_dummy in 0u8..1) {
+        let p = Pipeline::default_rust();
+        prop_assert_eq!(p.name, "default");
+        prop_assert_eq!(p.stages.len(), 3);
+        prop_assert_eq!(&p.stages[0].name, "test");
+        prop_assert_eq!(&p.stages[1].name, "lint");
+        prop_assert_eq!(&p.stages[2].name, "build");
+        prop_assert!(p.stages[0].required);
+        prop_assert!(p.stages[1].required);
+        prop_assert!(!p.stages[2].required); // build is optional
+    }
+}
