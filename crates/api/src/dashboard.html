@@ -204,14 +204,137 @@ function connectSSE() {
     ]);
     container.prepend(row);
     while (container.children.length > 50) container.removeChild(container.lastChild);
-    loadChangesets(); loadPipeline(); loadExplorations();
+    loadOverview();
   };
   evtSource.onerror = () => { document.getElementById('sseStatus').textContent = 'reconnecting...'; };
 }
 
-Promise.all([loadChangesets(), loadPipeline(), loadExplorations(), loadBranches()]);
+// Fast initial load via overview endpoint (1 request instead of 5).
+async function loadOverview() {
+  const data = await fetchJSON('/overview');
+  if (!data) return;
+  renderChangesets(data.changesets);
+  renderPipeline(data.pipeline);
+  renderGoals(data.goals);
+  renderBranches(data.branches);
+}
+
+function renderChangesets(data) {
+  if (!data || !data.length) { clearAndAppend('changesets', [el('div', {cls:'empty', text:'No changesets yet'})]); return; }
+  clearAndAppend('changesets', data.map(cs => {
+    const intent = cs.intent ? badge(cs.intent.kind, cs.intent.kind === 'bugfix' ? 'fail' : 'exploring') : null;
+    return el('div', {style:{padding:'8px 0',borderBottom:'1px solid var(--border)'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'13px',color:'var(--accent)'}, text:cs.id.slice(0,12)}),
+      intent ? el('span', {text:' '}) : null,
+      intent,
+      el('div', {style:{color:'var(--text-bright)',fontSize:'14px'}, text:cs.message}),
+      el('div', {style:{fontSize:'12px',color:'var(--text-dim)'}, text:timeAgo(cs.timestamp)}),
+    ].filter(Boolean));
+  }));
+}
+
+function renderPipeline(results) {
+  if (!results || !results.length) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'No pipeline results. Run: forge pipeline run'})]); return; }
+  const r = results[results.length - 1];
+  const header = el('div', {style:{marginBottom:'8px'}}, [
+    el('strong', {text:r.pipeline}),
+    document.createTextNode(' '),
+    el('span', {style:{color:r.passed?'var(--green)':'var(--red)'}, text:r.passed?'PASSED':'FAILED'}),
+    el('span', {style:{color:'var(--text-dim)',fontSize:'13px',marginLeft:'8px'}, text:(r.duration_ms/1000).toFixed(1)+'s'}),
+  ]);
+  const stages = r.stages.map(s => el('div', {style:{display:'flex',alignItems:'center',gap:'8px',padding:'4px 0',fontSize:'13px'}}, [
+    el('span', {style:{fontSize:'16px',color:s.passed?'var(--green)':'var(--red)'}, text:s.passed?'\u2713':'\u2717'}),
+    el('span', {style:{fontFamily:'var(--mono)',minWidth:'80px'}, text:s.name}),
+    el('span', {text:s.summary}),
+    el('span', {style:{color:'var(--text-dim)'}, text:(s.duration_ms/1000).toFixed(1)+'s'}),
+  ]));
+  clearAndAppend('pipeline', [header, ...stages]);
+}
+
+function renderGoals(goals) {
+  if (!goals || !goals.length) {
+    clearAndAppend('explorations', [
+      el('div', {cls:'empty', text:'No active explorations.'}),
+      createGoalForm(),
+    ]);
+    return;
+  }
+  const nodes = goals.map(g => {
+    const status = g.promoted ? 'promoted' : (g.approaches.length ? 'exploring' : 'new');
+    const header = el('div', {style:{display:'flex',alignItems:'center',gap:'8px',marginBottom:'4px'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',color:'var(--accent)',fontSize:'13px'}, text:g.id}),
+      badge(status, status === 'promoted' ? 'pass' : 'exploring'),
+      el('strong', {style:{color:'var(--text-bright)'}, text:g.description}),
+      el('span', {style:{color:'var(--text-dim)',fontSize:'12px',marginLeft:'auto'}, text:'target: ' + g.target_branch}),
+    ]);
+    const approaches = g.approaches.map(a => el('div', {style:{padding:'6px 0',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:'12px'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'14px',color:'var(--accent)',minWidth:'140px'}, text:a.name}),
+      badge(a.verification, 'verified'),
+      el('span', {style:{flex:'1',fontSize:'13px'}, text:a.changeset_count + ' commits' + (a.latest_message ? ' \u2014 ' + a.latest_message : '')}),
+    ]));
+    const agents = g.claims.length ? el('div', {style:{fontSize:'12px',color:'var(--text-dim)',marginTop:'4px'}, text:g.claims.length + ' agent(s) active'}) : null;
+    return el('div', {style:{marginBottom:'16px'}}, [header, ...approaches, agents].filter(Boolean));
+  });
+  nodes.push(createGoalForm());
+  clearAndAppend('explorations', nodes);
+}
+
+function renderBranches(data) {
+  if (!data || !data.length) { clearAndAppend('branches', [el('div', {cls:'empty', text:'No branches'})]); return; }
+  clearAndAppend('branches', data.map(b => {
+    const name = b.current
+      ? el('strong', {style:{color:'var(--green)'}, text:'* ' + b.name})
+      : el('span', {text:b.name});
+    return el('div', {style:{padding:'4px 0',fontSize:'14px'}}, [
+      name,
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'12px',color:'var(--text-dim)',marginLeft:'8px'}, text:b.head.slice(0,12)}),
+    ]);
+  }));
+}
+
+// Goal creation form (inline in dashboard).
+function createGoalForm() {
+  const form = el('div', {style:{marginTop:'12px',padding:'12px',border:'1px dashed var(--border)',borderRadius:'6px'}});
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'What do you want to explore?';
+  Object.assign(input.style, {
+    background:'var(--bg)', color:'var(--text)', border:'1px solid var(--border)',
+    borderRadius:'4px', padding:'6px 10px', fontSize:'14px', width:'70%', marginRight:'8px',
+  });
+  const btn = document.createElement('button');
+  btn.textContent = 'Create Goal';
+  Object.assign(btn.style, {
+    background:'var(--accent)', color:'#fff', border:'none', borderRadius:'4px',
+    padding:'6px 14px', fontSize:'14px', cursor:'pointer',
+  });
+  btn.onclick = async () => {
+    const desc = input.value.trim();
+    if (!desc) return;
+    btn.disabled = true;
+    btn.textContent = 'Creating...';
+    const res = await fetch(API + '/explore/goals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: desc }),
+    });
+    if (res.ok) {
+      input.value = '';
+      loadOverview();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      btn.textContent = err.error || 'Failed';
+    }
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Create Goal'; }, 2000);
+  };
+  form.appendChild(input);
+  form.appendChild(btn);
+  return form;
+}
+
+loadOverview();
 connectSSE();
-setInterval(() => { loadChangesets(); loadBranches(); }, 30000);
+setInterval(loadOverview, 30000);
 </script>
 </body>
 </html>
