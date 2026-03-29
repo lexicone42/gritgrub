@@ -156,7 +156,7 @@ fn validate_request(
         None => {
             if require_write || state.require_auth_for_reads {
                 return Err((StatusCode::UNAUTHORIZED,
-                    "authentication required — pass Bearer token in Authorization header".into()));
+                    "auth_required: pass Bearer token in Authorization header".into()));
             }
 
             let check = state.rate_limiter.check(None);
@@ -261,6 +261,8 @@ struct StatusChange {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -292,7 +294,11 @@ struct SetRefBody {
 // ── Handlers ───────────────────────────────────────────────────────
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
+    (status, Json(ErrorResponse { error: msg.into(), code: None }))
+}
+
+fn err_code(status: StatusCode, code: &'static str, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(ErrorResponse { error: msg.into(), code: Some(code) }))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -969,7 +975,7 @@ async fn provision_agent(
     let auth = validate_request(&state, &headers, true).map_err(|(s, m)| err(s, m))?;
     let (_, scopes) = auth.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "auth required"))?;
     if !scopes.allows_identity() {
-        return Err(err(StatusCode::FORBIDDEN, "token lacks identity scope — provisioning requires admin or identity scope"));
+        return Err(err_code(StatusCode::FORBIDDEN, "scope_denied", "token lacks identity scope — provisioning requires admin or identity scope"));
     }
 
     let agent_name = if body.name.is_empty() {
