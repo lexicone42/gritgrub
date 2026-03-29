@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use gritgrub_store::Repository;
 use gritgrub_api::{ServerConfig, ForgeServer};
 
-pub fn run(addr: Option<&str>, http_addr: Option<&str>, config_path: Option<&str>, init_config: bool) -> Result<()> {
+pub fn run(addr: Option<&str>, http_addr: Option<&str>, config_path: Option<&str>, init_config: bool, no_tls: bool) -> Result<()> {
     // --init-config: write a default config file and exit.
     if init_config {
         let path = config_path.unwrap_or(".forge/server.toml");
@@ -35,14 +35,27 @@ pub fn run(addr: Option<&str>, http_addr: Option<&str>, config_path: Option<&str
         config.listen.http_addr = a.to_string();
     }
 
+    // --no-tls: skip all TLS setup for local development.
+    if no_tls {
+        config.tls.enabled = false;
+        config.tls.cert_path.clear();
+        config.tls.key_path.clear();
+    }
+
     // Auto-generate TLS certs via mkcert if not configured.
-    if !config.tls.enabled {
+    if !no_tls && !config.tls.enabled {
         let tls_dir = PathBuf::from(".forge/tls");
         let cert_path = tls_dir.join("cert.pem");
         let key_path = tls_dir.join("key.pem");
 
         if cert_path.exists() && key_path.exists() {
             // Certs exist from a previous run — use them.
+            // But warn if the listen address changed (SAN mismatch).
+            let host = parse_host(&config.listen.grpc_addr);
+            if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+                eprintln!("NOTE: Existing TLS certs may not include {} in their SAN.", host);
+                eprintln!("  If TLS fails, delete .forge/tls/ and restart to regenerate.");
+            }
             config.tls.enabled = true;
             config.tls.cert_path = cert_path.to_string_lossy().to_string();
             config.tls.key_path = key_path.to_string_lossy().to_string();
@@ -54,12 +67,32 @@ pub fn run(addr: Option<&str>, http_addr: Option<&str>, config_path: Option<&str
             // Parse the listen address to get the host for mkcert.
             let host = parse_host(&config.listen.grpc_addr);
 
+            // Include all likely addresses in the SAN so the cert works
+            // regardless of which interface clients connect through.
+            let mut san_hosts = vec![
+                host.clone(),
+                "localhost".to_string(),
+                "::1".to_string(),
+                "127.0.0.1".to_string(),
+            ];
+            // If binding to 0.0.0.0, also add all local IPs.
+            if host == "0.0.0.0" {
+                if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
+                    let ips = String::from_utf8_lossy(&output.stdout);
+                    for ip in ips.split_whitespace() {
+                        if !san_hosts.contains(&ip.to_string()) {
+                            san_hosts.push(ip.to_string());
+                        }
+                    }
+                }
+            }
+            let mut mkcert_args = vec![
+                "-cert-file".to_string(), cert_path.to_string_lossy().to_string(),
+                "-key-file".to_string(), key_path.to_string_lossy().to_string(),
+            ];
+            mkcert_args.extend(san_hosts);
             let status = std::process::Command::new("mkcert")
-                .args([
-                    "-cert-file", &cert_path.to_string_lossy(),
-                    "-key-file", &key_path.to_string_lossy(),
-                    &host, "localhost", "::1", "127.0.0.1",
-                ])
+                .args(&mkcert_args)
                 .status()?;
 
             if !status.success() {

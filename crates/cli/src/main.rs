@@ -223,6 +223,9 @@ enum Commands {
         /// Write a default config file and exit
         #[arg(long)]
         init_config: bool,
+        /// Disable TLS (plain HTTP/gRPC, useful for local development)
+        #[arg(long)]
+        no_tls: bool,
     },
 }
 
@@ -606,8 +609,8 @@ fn main() -> Result<()> {
             }
             ExploreAction::Abandon { goal } => commands::explore::abandon(&goal),
         },
-        Commands::Serve { addr, http_addr, config, init_config } => {
-            commands::serve::run(addr.as_deref(), http_addr.as_deref(), config.as_deref(), init_config)
+        Commands::Serve { addr, http_addr, config, init_config, no_tls } => {
+            commands::serve::run(addr.as_deref(), http_addr.as_deref(), config.as_deref(), init_config, no_tls)
         }
     }
 }
