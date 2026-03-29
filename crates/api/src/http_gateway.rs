@@ -6,13 +6,16 @@
 //! All auth uses the same Bearer token scheme as gRPC.
 
 use std::sync::Arc;
+use std::convert::Infallible;
 use axum::{
     Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{Html, Json, Sse},
     routing::{get, post},
 };
+use axum::response::sse::{Event as SseEvent, KeepAlive};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use gritgrub_core::*;
 use gritgrub_store::Repository;
@@ -53,6 +56,15 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/v1/identities/{id}", get(get_identity))
         // Status / info
         .route("/api/v1/status", get(repo_status))
+        // Exploration tree
+        .route("/api/v1/explore/goals", get(list_goals))
+        .route("/api/v1/explore/goals/{id}", get(get_goal))
+        // Pipeline results
+        .route("/api/v1/pipeline/{id}", get(get_pipeline_results))
+        // Server-Sent Events
+        .route("/api/v1/events", get(sse_events))
+        // Dashboard
+        .route("/", get(dashboard))
         .with_state(state)
 }
 
@@ -549,6 +561,204 @@ fn changeset_to_response(id: &ObjectId, cs: &Changeset) -> ChangesetResponse {
         }),
     }
 }
+
+// ── Exploration endpoints ──────────────────────────────────────
+
+#[derive(Serialize)]
+struct GoalResponse {
+    id: String,
+    description: String,
+    target_branch: String,
+    approaches: Vec<ApproachResponse>,
+    claims: Vec<ClaimResponse>,
+    promoted: Option<String>,
+    constraints: Vec<ConstraintResponse>,
+}
+
+#[derive(Serialize)]
+struct ApproachResponse {
+    name: String,
+    tip: Option<String>,
+    changeset_count: usize,
+    latest_message: Option<String>,
+    created_by: Option<String>,
+    verification: String,
+}
+
+#[derive(Serialize)]
+struct ClaimResponse {
+    agent: String,
+    approach: String,
+    intent: String,
+    heartbeat: u64,
+}
+
+#[derive(Serialize)]
+struct ConstraintResponse {
+    kind: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct PipelineResponse {
+    pipeline: String,
+    changeset: String,
+    passed: bool,
+    duration_ms: u64,
+    runner: String,
+    stages: Vec<StageResponse>,
+}
+
+#[derive(Serialize)]
+struct StageResponse {
+    name: String,
+    passed: bool,
+    duration_ms: u64,
+    summary: String,
+    tests_passed: u32,
+    tests_failed: u32,
+    warnings: u32,
+    required: bool,
+}
+
+async fn list_goals(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<GoalResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
+
+    let goals = state.repo.list_goals()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut result = Vec::new();
+    for (goal_id, _goal) in &goals {
+        let summary = state.repo.goal_summary(goal_id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        result.push(goal_summary_to_response(&summary));
+    }
+    Ok(Json(result))
+}
+
+async fn get_goal(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id_prefix): Path<String>,
+) -> Result<Json<GoalResponse>, (StatusCode, Json<ErrorResponse>)> {
+    validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
+
+    let goals = state.repo.list_goals()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let matched: Vec<_> = goals.iter()
+        .filter(|(id, _)| id.to_hex().starts_with(&id_prefix))
+        .collect();
+
+    match matched.len() {
+        0 => Err(err(StatusCode::NOT_FOUND, format!("no goal matching '{}'", id_prefix))),
+        1 => {
+            let summary = state.repo.goal_summary(&matched[0].0)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(Json(goal_summary_to_response(&summary)))
+        }
+        n => Err(err(StatusCode::BAD_REQUEST, format!("ambiguous prefix '{}': {} matches", id_prefix, n))),
+    }
+}
+
+fn goal_summary_to_response(s: &GoalSummary) -> GoalResponse {
+    GoalResponse {
+        id: s.goal_id.to_hex()[..16].to_string(),
+        description: s.goal.description.clone(),
+        target_branch: s.goal.target_branch.clone(),
+        approaches: s.approaches.iter().map(|a| ApproachResponse {
+            name: a.name.clone(),
+            tip: a.tip.map(|id| id.to_hex()[..12].to_string()),
+            changeset_count: a.changeset_count,
+            latest_message: a.latest_message.clone(),
+            created_by: a.created_by.map(|id| id.to_string()),
+            verification: format!("{}", a.verification),
+        }).collect(),
+        claims: s.claims.iter().map(|c| ClaimResponse {
+            agent: c.agent.to_string(),
+            approach: c.approach.clone(),
+            intent: c.intent.clone(),
+            heartbeat: c.heartbeat,
+        }).collect(),
+        promoted: s.promoted.clone(),
+        constraints: s.goal.constraints.iter().map(|c| ConstraintResponse {
+            kind: format!("{:?}", c.kind),
+            description: c.description.clone(),
+        }).collect(),
+    }
+}
+
+async fn get_pipeline_results(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id_hex): Path<String>,
+) -> Result<Json<Vec<PipelineResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
+
+    let id = parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?;
+    let results = state.repo.get_pipeline_results(&id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let response: Vec<PipelineResponse> = results.iter().map(|r| PipelineResponse {
+        pipeline: r.pipeline.clone(),
+        changeset: r.changeset.to_hex()[..12].to_string(),
+        passed: r.passed,
+        duration_ms: r.duration_ms,
+        runner: r.runner.to_string(),
+        stages: r.stages.iter().map(|s| StageResponse {
+            name: s.name.clone(),
+            passed: s.passed,
+            duration_ms: s.duration_ms,
+            summary: s.summary.clone(),
+            tests_passed: s.tests_passed,
+            tests_failed: s.tests_failed,
+            warnings: s.warnings,
+            required: s.required,
+        }).collect(),
+    }).collect();
+
+    Ok(Json(response))
+}
+
+// ── Server-Sent Events ────────────────────────────────────────
+
+async fn sse_events(
+    State(state): State<HttpState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let repo = state.repo.clone();
+    let stream = async_stream::stream! {
+        // Start from latest event.
+        let mut seq = repo.latest_event_seq().unwrap_or(0);
+        loop {
+            match repo.read_events(seq + 1, 10) {
+                Ok(events) if !events.is_empty() => {
+                    for (event_seq, data) in events {
+                        seq = event_seq;
+                        let json = String::from_utf8_lossy(&data).to_string();
+                        yield Ok(SseEvent::default().data(json).id(event_seq.to_string()));
+                    }
+                }
+                _ => {
+                    // No new events — wait briefly then poll again.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ── Dashboard ─────────────────────────────────────────────────
+
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
+}
+
+// ── Conversion helpers ─────────────────────────────────────────
 
 fn ref_to_response(name: &str, reference: &Ref, repo: &Repository) -> RefResponse {
     match reference {

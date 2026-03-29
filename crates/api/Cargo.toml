@@ -21,6 +21,8 @@ axum = { workspace = true }
 tower = { workspace = true }
 base64 = "0.22"
 uuid = { workspace = true }
+futures-util = "0.3.32"
+async-stream = "0.3.6"
 
 [build-dependencies]
 tonic-build = "0.12"

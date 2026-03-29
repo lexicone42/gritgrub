@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forge — gritgrub dashboard</title>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #c9d1d9; --text-dim: #8b949e; --text-bright: #f0f6fc;
+  --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+  --yellow: #d29922; --purple: #bc8cff;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); line-height: 1.5; }
+a { color: var(--accent); text-decoration: none; }
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 0; }
+header .container { display: flex; align-items: center; gap: 16px; }
+header h1 { font-size: 20px; color: var(--text-bright); font-weight: 600; }
+header h1 span { color: var(--accent); }
+header .status { margin-left: auto; font-size: 13px; color: var(--text-dim); }
+
+main { padding: 24px 0; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; }
+.card h2 { font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+.card.full { grid-column: 1 / -1; }
+
+.empty { color: var(--text-dim); font-style: italic; font-size: 14px; padding: 16px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="container">
+    <h1><span>forge</span> dashboard</h1>
+    <div class="status" id="sseStatus">connecting...</div>
+  </div>
+</header>
+<main class="container">
+  <div class="grid">
+    <div class="card" id="changesets-card">
+      <h2>Recent Changesets</h2>
+      <div id="changesets"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="card" id="pipeline-card">
+      <h2>Pipeline</h2>
+      <div id="pipeline"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="card full" id="explore-card">
+      <h2>Exploration Tree</h2>
+      <div id="explorations"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="card" id="branches-card">
+      <h2>Branches</h2>
+      <div id="branches"><div class="empty">Loading...</div></div>
+    </div>
+    <div class="card" id="events-card">
+      <h2>Live Events</h2>
+      <div id="events"><div class="empty">Waiting for events...</div></div>
+    </div>
+  </div>
+</main>
+<script>
+// All rendering uses safe DOM methods (textContent, createElement) — no innerHTML with untrusted data.
+const API = '/api/v1';
+
+async function fetchJSON(path) {
+  try {
+    const res = await fetch(API + path);
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
+}
+
+function el(tag, attrs, children) {
+  const e = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'style') Object.assign(e.style, v);
+    else if (k === 'text') e.textContent = v;
+    else if (k === 'cls') e.className = v;
+    else e.setAttribute(k, v);
+  }
+  if (children) for (const c of children) {
+    if (typeof c === 'string') e.appendChild(document.createTextNode(c));
+    else if (c) e.appendChild(c);
+  }
+  return e;
+}
+
+function badge(text, type) {
+  const colors = { pass: '#3fb950', fail: '#f85149', exploring: '#d29922', verified: '#bc8cff' };
+  const bgs = { pass: 'rgba(63,185,80,0.15)', fail: 'rgba(248,81,73,0.15)', exploring: 'rgba(210,153,34,0.15)', verified: 'rgba(188,140,255,0.15)' };
+  return el('span', { style: { display:'inline-block', padding:'2px 8px', borderRadius:'12px', fontSize:'12px', fontWeight:'500', color: colors[type]||'#8b949e', background: bgs[type]||'rgba(139,148,158,0.15)' }}, [text]);
+}
+
+function timeAgo(us) {
+  const sec = Math.floor((Date.now() * 1000 - us) / 1000000);
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+  return Math.floor(sec/86400) + 'd ago';
+}
+
+function clearAndAppend(id, nodes) {
+  const container = document.getElementById(id);
+  container.replaceChildren(...nodes);
+}
+
+async function loadChangesets() {
+  const data = await fetchJSON('/log?count=8');
+  if (!data || !data.length) { clearAndAppend('changesets', [el('div', {cls:'empty', text:'No changesets yet'})]); return; }
+  clearAndAppend('changesets', data.map(cs => {
+    const row = el('div', {style:{padding:'8px 0',borderBottom:'1px solid var(--border)'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'13px',color:'var(--accent)'}, text:cs.id.slice(0,12)}),
+      cs.intent ? badge(cs.intent.kind, cs.intent.kind === 'bugfix' ? 'fail' : 'exploring') : null,
+      el('div', {style:{color:'var(--text-bright)',fontSize:'14px'}, text:cs.message}),
+      el('div', {style:{fontSize:'12px',color:'var(--text-dim)'}, text:timeAgo(cs.timestamp)}),
+    ].filter(Boolean));
+    return row;
+  }));
+}
+
+async function loadPipeline() {
+  const log = await fetchJSON('/log?count=1');
+  if (!log || !log.length) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'No HEAD'})]); return; }
+  const fullId = log[0].id;
+  if (fullId.length < 64) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'Run: forge pipeline run'})]); return; }
+
+  const results = await fetchJSON('/pipeline/' + fullId);
+  if (!results || !results.length) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'No pipeline results. Run: forge pipeline run'})]); return; }
+
+  const r = results[results.length - 1];
+  const header = el('div', {style:{marginBottom:'8px'}}, [
+    el('strong', {text:r.pipeline}),
+    document.createTextNode(' '),
+    el('span', {style:{color:r.passed?'var(--green)':'var(--red)'}, text:r.passed?'PASSED':'FAILED'}),
+    el('span', {style:{color:'var(--text-dim)',fontSize:'13px',marginLeft:'8px'}, text:(r.duration_ms/1000).toFixed(1)+'s'}),
+  ]);
+  const stages = r.stages.map(s => el('div', {style:{display:'flex',alignItems:'center',gap:'8px',padding:'4px 0',fontSize:'13px'}}, [
+    el('span', {style:{fontSize:'16px',color:s.passed?'var(--green)':'var(--red)'}, text:s.passed?'\u2713':'\u2717'}),
+    el('span', {style:{fontFamily:'var(--mono)',minWidth:'80px'}, text:s.name}),
+    el('span', {text:s.summary}),
+    el('span', {style:{color:'var(--text-dim)'}, text:(s.duration_ms/1000).toFixed(1)+'s'}),
+  ]));
+  clearAndAppend('pipeline', [header, ...stages]);
+}
+
+async function loadExplorations() {
+  const goals = await fetchJSON('/explore/goals');
+  if (!goals || !goals.length) { clearAndAppend('explorations', [el('div', {cls:'empty', text:'No active explorations. Start one: forge explore create "description"'})]); return; }
+
+  const nodes = goals.map(g => {
+    const status = g.promoted ? 'promoted' : (g.approaches.length ? 'exploring' : 'new');
+    const header = el('div', {style:{display:'flex',alignItems:'center',gap:'8px',marginBottom:'4px'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',color:'var(--accent)',fontSize:'13px'}, text:g.id}),
+      badge(status, status === 'promoted' ? 'pass' : 'exploring'),
+      el('strong', {style:{color:'var(--text-bright)'}, text:g.description}),
+      el('span', {style:{color:'var(--text-dim)',fontSize:'12px',marginLeft:'auto'}, text:'target: ' + g.target_branch}),
+    ]);
+
+    const approaches = g.approaches.map(a => el('div', {style:{padding:'6px 0',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:'12px'}}, [
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'14px',color:'var(--accent)',minWidth:'140px'}, text:a.name}),
+      badge(a.verification, 'verified'),
+      el('span', {style:{flex:'1',fontSize:'13px'}, text:a.changeset_count + ' commits' + (a.latest_message ? ' \u2014 ' + a.latest_message : '')}),
+    ]));
+
+    const agents = g.claims.length ? el('div', {style:{fontSize:'12px',color:'var(--text-dim)',marginTop:'4px'}, text:g.claims.length + ' agent(s) active'}) : null;
+    return el('div', {style:{marginBottom:'16px'}}, [header, ...approaches, agents].filter(Boolean));
+  });
+  clearAndAppend('explorations', nodes);
+}
+
+async function loadBranches() {
+  const data = await fetchJSON('/branches');
+  if (!data || !data.length) { clearAndAppend('branches', [el('div', {cls:'empty', text:'No branches'})]); return; }
+  clearAndAppend('branches', data.map(b => {
+    const name = b.current
+      ? el('strong', {style:{color:'var(--green)'}, text:'* ' + b.name})
+      : el('span', {text:b.name});
+    return el('div', {style:{padding:'4px 0',fontSize:'14px'}}, [
+      name,
+      el('span', {style:{fontFamily:'var(--mono)',fontSize:'12px',color:'var(--text-dim)',marginLeft:'8px'}, text:b.head.slice(0,12)}),
+    ]);
+  }));
+}
+
+// SSE for live updates.
+let eventCount = 0;
+function connectSSE() {
+  const evtSource = new EventSource(API + '/events');
+  evtSource.onopen = () => { document.getElementById('sseStatus').textContent = 'live'; };
+  evtSource.onmessage = (e) => {
+    eventCount++;
+    const container = document.getElementById('events');
+    if (eventCount === 1) container.replaceChildren(); // clear "waiting" message
+    const row = el('div', {style:{padding:'4px 0',fontSize:'13px',fontFamily:'var(--mono)',color:'var(--text-dim)',borderBottom:'1px solid var(--border)'}}, [
+      el('span', {style:{color:'var(--accent)'}, text:'#' + (e.lastEventId || eventCount)}),
+      document.createTextNode(' ' + e.data),
+    ]);
+    container.prepend(row);
+    while (container.children.length > 50) container.removeChild(container.lastChild);
+    loadChangesets(); loadPipeline(); loadExplorations();
+  };
+  evtSource.onerror = () => { document.getElementById('sseStatus').textContent = 'reconnecting...'; };
+}
+
+Promise.all([loadChangesets(), loadPipeline(), loadExplorations(), loadBranches()]);
+connectSSE();
+setInterval(() => { loadChangesets(); loadBranches(); }, 30000);
+</script>
+</body>
+</html>
