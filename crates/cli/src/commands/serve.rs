@@ -76,13 +76,13 @@ pub fn run(addr: Option<&str>, http_addr: Option<&str>, config_path: Option<&str
                 "127.0.0.1".to_string(),
             ];
             // If binding to 0.0.0.0, also add all local IPs.
-            if host == "0.0.0.0" {
-                if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
-                    let ips = String::from_utf8_lossy(&output.stdout);
-                    for ip in ips.split_whitespace() {
-                        if !san_hosts.contains(&ip.to_string()) {
-                            san_hosts.push(ip.to_string());
-                        }
+            if host == "0.0.0.0"
+                && let Ok(output) = std::process::Command::new("hostname").arg("-I").output()
+            {
+                let ips = String::from_utf8_lossy(&output.stdout);
+                for ip in ips.split_whitespace() {
+                    if !san_hosts.contains(&ip.to_string()) {
+                        san_hosts.push(ip.to_string());
                     }
                 }
             }

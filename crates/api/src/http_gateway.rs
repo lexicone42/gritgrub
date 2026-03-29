@@ -404,10 +404,17 @@ async fn get_changeset(
 ) -> Result<Json<ChangesetResponse>, (StatusCode, Json<ErrorResponse>)> {
     validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
 
-    let id = parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?;
-    match state.repo.get_object(&id)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
+    let (id, obj) = if id_hex.len() == 64 {
+        let id = parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?;
+        let obj = state.repo.get_object(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        (id, obj)
+    } else {
+        let (id, obj) = state.repo.find_by_prefix(&id_hex)
+            .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+        (id, Some(obj))
+    };
+    match obj {
         Some(Object::Changeset(cs)) => Ok(Json(changeset_to_response(&id, &cs))),
         _ => Err(err(StatusCode::NOT_FOUND, "changeset not found")),
     }
@@ -698,7 +705,14 @@ async fn get_pipeline_results(
 ) -> Result<Json<Vec<PipelineResponse>>, (StatusCode, Json<ErrorResponse>)> {
     validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
 
-    let id = parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?;
+    // Accept both full 64-char hex IDs and short prefixes.
+    let id = if id_hex.len() == 64 {
+        parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?
+    } else {
+        let (found_id, _) = state.repo.find_by_prefix(&id_hex)
+            .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+        found_id
+    };
     let results = state.repo.get_pipeline_results(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

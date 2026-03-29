@@ -129,10 +129,9 @@ async function loadChangesets() {
 async function loadPipeline() {
   const log = await fetchJSON('/log?count=1');
   if (!log || !log.length) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'No HEAD'})]); return; }
-  const fullId = log[0].id;
-  if (fullId.length < 64) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'Run: forge pipeline run'})]); return; }
-
-  const results = await fetchJSON('/pipeline/' + fullId);
+  // Pipeline endpoint accepts short ID prefixes.
+  const headId = log[0].id;
+  const results = await fetchJSON('/pipeline/' + headId);
   if (!results || !results.length) { clearAndAppend('pipeline', [el('div', {cls:'empty', text:'No pipeline results. Run: forge pipeline run'})]); return; }
 
   const r = results[results.length - 1];

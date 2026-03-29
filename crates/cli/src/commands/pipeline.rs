@@ -251,9 +251,22 @@ fn execute_stage(
             let output = cmd.output().context("failed to run cargo clippy")?;
             let stderr = String::from_utf8_lossy(&output.stderr);
 
+            // -D warnings turns warnings into errors, so count both.
             let warning_count = stderr.matches("warning:").count() as u32;
-            let summary = if warning_count > 0 {
-                format!("{} warnings", warning_count)
+            let error_count = stderr.lines()
+                .filter(|l| l.starts_with("error:") || l.starts_with("error["))
+                .count() as u32;
+            let issue_count = warning_count + error_count;
+            let summary = if !output.status.success() {
+                if issue_count > 0 {
+                    format!("{} issues", issue_count)
+                } else {
+                    // Clippy failed but we couldn't parse why.
+                    let first_err = stderr.lines()
+                        .find(|l| l.contains("error"))
+                        .unwrap_or("clippy failed");
+                    first_err.chars().take(200).collect()
+                }
             } else {
                 "clean".to_string()
             };
@@ -263,7 +276,7 @@ fn execute_stage(
                 output.status.code(),
                 summary,
                 0, 0,
-                warning_count,
+                issue_count,
             ))
         }
 
