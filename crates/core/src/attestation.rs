@@ -99,6 +99,8 @@ pub enum Predicate {
     Link(LinkAttestation),
     /// Code review attestation (human or agent approved).
     Review(ReviewAttestation),
+    /// Verification pipeline result.
+    Pipeline(serde_json::Value),
     /// Opaque/unknown predicate (forward compat).
     Other(BTreeMap<String, String>),
 }

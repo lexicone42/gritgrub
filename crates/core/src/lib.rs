@@ -9,6 +9,7 @@ pub mod signing;
 pub mod token;
 pub mod policy;
 pub mod exploration;
+pub mod pipeline;
 
 pub use id::{ObjectId, IdError};
 pub use object::{Object, Blob, ObjectError};
@@ -19,6 +20,10 @@ pub use refs::Ref;
 pub use signing::{IdentityKeyPair, verify_envelope_signature, SigningError};
 pub use token::{generate_token, generate_token_v2, validate_token, ValidatedToken, TokenScopes, TokenError};
 pub use policy::{RefPolicy, PolicyDenial};
+pub use pipeline::{
+    Pipeline, Stage, StageKind, Trigger, PipelineResult, StageResult,
+    RequiredAttestations, PIPELINE_PREDICATE,
+};
 pub use exploration::{
     Goal, Constraint, ConstraintKind, Claim, GoalSummary, ApproachSummary,
     VerificationLevel, PromoteResult, DEFAULT_CLAIM_TTL_SECS,

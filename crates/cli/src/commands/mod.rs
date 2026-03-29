@@ -26,3 +26,4 @@ pub mod stash;
 pub mod reset;
 pub mod collab;
 pub mod explore;
+pub mod pipeline;

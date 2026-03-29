@@ -197,6 +197,12 @@ enum Commands {
         action: CollabAction,
     },
 
+    /// Verification pipelines (CI/CD embedded in the VCS)
+    Pipeline {
+        #[command(subcommand)]
+        action: PipelineAction,
+    },
+
     /// Exploration tree — structured parallel search over solution spaces
     Explore {
         #[command(subcommand)]
@@ -385,6 +391,33 @@ enum CollabAction {
 }
 
 #[derive(Subcommand)]
+enum PipelineAction {
+    /// Run a pipeline on the current HEAD
+    Run {
+        /// Pipeline name (default: "default")
+        #[arg(long)]
+        name: Option<String>,
+        /// Changeset ID (default: HEAD)
+        id: Option<String>,
+    },
+    /// Define a new pipeline
+    Define {
+        /// Pipeline name
+        name: String,
+        /// Stage specs: test, lint, build, build-release, cmd:<command>
+        #[arg(long, short)]
+        stage: Vec<String>,
+    },
+    /// List defined pipelines
+    List,
+    /// Show pipeline results for a changeset
+    Show {
+        /// Changeset ID (default: HEAD)
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ExploreAction {
     /// Create a new exploration goal
     Create {
@@ -549,6 +582,16 @@ fn main() -> Result<()> {
             StashAction::List => commands::stash::list(),
         },
         Commands::Reset { target, hard } => commands::reset::run(&target, hard),
+        Commands::Pipeline { action } => match action {
+            PipelineAction::Run { name, id } => {
+                commands::pipeline::run(name.as_deref(), id.as_deref())
+            }
+            PipelineAction::Define { name, stage } => {
+                commands::pipeline::define(&name, &stage)
+            }
+            PipelineAction::List => commands::pipeline::list(),
+            PipelineAction::Show { id } => commands::pipeline::show(id.as_deref()),
+        },
         Commands::Explore { action } => match action {
             ExploreAction::Create { description, target, max_approaches, time_budget, constraint } => {
                 commands::explore::create(&description, &target, max_approaches, time_budget, &constraint)

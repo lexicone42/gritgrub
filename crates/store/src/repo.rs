@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use gritgrub_core::*;
 use gritgrub_core::attestation::*;
 use gritgrub_core::exploration;
+use gritgrub_core::pipeline;
 use crate::backend::{ObjectStore, RefStore, ConfigStore, IdentityStore, EventStore, RevocationStore};
 use crate::redb_backend::RedbBackend;
 
@@ -827,6 +828,132 @@ impl Repository {
         Ok(None) // No policy denied the update.
     }
 
+    // ── Pipelines ──────────────────────────────────────────────────
+
+    /// Save a pipeline definition to repo config.
+    pub fn save_pipeline(&self, pipeline: &Pipeline) -> Result<()> {
+        let json = serde_json::to_string(pipeline)?;
+        self.set_config(&format!("pipeline.{}", pipeline.name), &json)
+    }
+
+    /// Load a pipeline definition from repo config.
+    pub fn get_pipeline(&self, name: &str) -> Result<Option<Pipeline>> {
+        match self.get_config(&format!("pipeline.{}", name))? {
+            Some(json) => {
+                let p: Pipeline = serde_json::from_str(&json)?;
+                Ok(Some(p))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all defined pipelines.
+    pub fn list_pipelines(&self) -> Result<Vec<Pipeline>> {
+        let entries = self.list_config_prefix("pipeline.")?;
+        let mut pipelines = Vec::new();
+        for (_key, json) in entries {
+            if let Ok(p) = serde_json::from_str::<Pipeline>(&json) {
+                pipelines.push(p);
+            }
+        }
+        Ok(pipelines)
+    }
+
+    /// Store a pipeline result as an attestation on a changeset.
+    ///
+    /// The pipeline result is serialized to JSON, wrapped in an in-toto
+    /// Statement, and signed as a DSSE envelope. This creates a
+    /// cryptographically verifiable proof that the pipeline ran and
+    /// what the results were.
+    pub fn attest_pipeline_result(&self, result: &PipelineResult) -> Result<ObjectId> {
+        let result_value = serde_json::to_value(result)?;
+        let subject = Subject::from_object_id("changeset", &result.changeset);
+        let statement = Statement::new(
+            vec![subject],
+            pipeline::PIPELINE_PREDICATE,
+            Predicate::Pipeline(result_value),
+        );
+        self.attest(&result.changeset, &statement)
+    }
+
+    /// Find pipeline attestations for a changeset.
+    /// Returns the parsed PipelineResults.
+    pub fn get_pipeline_results(&self, changeset_id: &ObjectId) -> Result<Vec<PipelineResult>> {
+        let attestations = self.get_attestations(changeset_id)?;
+        let mut results = Vec::new();
+        for (_id, env) in attestations {
+            // Try to parse the payload as a Statement with a pipeline predicate.
+            if let Ok(stmt) = serde_json::from_slice::<Statement>(&env.payload) {
+                if stmt.predicate_type == pipeline::PIPELINE_PREDICATE {
+                    if let Predicate::Pipeline(ref value) = stmt.predicate {
+                        if let Ok(pr) = serde_json::from_value::<PipelineResult>(value.clone()) {
+                            results.push(pr);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Check if a changeset has a passing attestation for a specific pipeline.
+    pub fn has_passing_pipeline(&self, changeset_id: &ObjectId, pipeline_name: &str) -> Result<bool> {
+        let results = self.get_pipeline_results(changeset_id)?;
+        Ok(results.iter().any(|r| r.pipeline == pipeline_name && r.passed))
+    }
+
+    /// Compute the verification level of a changeset from its attestations.
+    pub fn compute_verification_level(&self, changeset_id: &ObjectId) -> Result<VerificationLevel> {
+        let results = self.get_pipeline_results(changeset_id)?;
+        let attestations = self.get_attestations(changeset_id)?;
+
+        if attestations.is_empty() {
+            return Ok(VerificationLevel::Unknown);
+        }
+
+        // Check what we have.
+        let has_tests = results.iter().any(|r| {
+            r.passed && r.stages.iter().any(|s| s.name == "test" && s.passed)
+        });
+        let has_lint = results.iter().any(|r| {
+            r.passed && r.stages.iter().any(|s| s.name == "lint" && s.passed)
+        });
+        let has_build = results.iter().any(|r| {
+            r.stages.iter().any(|s| s.name == "build" && s.passed)
+        });
+
+        // Check for SLSA provenance and review attestations.
+        let has_slsa = attestations.iter().any(|(_id, env)| {
+            serde_json::from_slice::<Statement>(&env.payload)
+                .map(|s| s.predicate_type.contains("slsa"))
+                .unwrap_or(false)
+        });
+        let has_review = attestations.iter().any(|(_id, env)| {
+            serde_json::from_slice::<Statement>(&env.payload)
+                .map(|s| s.predicate_type.contains("review"))
+                .unwrap_or(false)
+        });
+
+        // Compute level (monotonic — each level implies all lower levels).
+        if has_slsa {
+            return Ok(VerificationLevel::SlsaL1);
+        }
+        if has_review {
+            return Ok(VerificationLevel::Reviewed);
+        }
+        if has_tests && has_lint {
+            return Ok(VerificationLevel::Attested);
+        }
+        if has_tests {
+            return Ok(VerificationLevel::Tested);
+        }
+        if has_build {
+            return Ok(VerificationLevel::Builds);
+        }
+
+        Ok(VerificationLevel::Unknown)
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append a structured event to the persistent log.
@@ -1541,7 +1668,8 @@ impl Repository {
                 changeset_count: count,
                 latest_message,
                 created_by,
-                verification: VerificationLevel::Unknown, // TODO: compute from attestations
+                verification: tip.map(|id| self.compute_verification_level(&id).unwrap_or(VerificationLevel::Unknown))
+                    .unwrap_or(VerificationLevel::Unknown),
             });
         }
 
