@@ -197,12 +197,41 @@ function connectSSE() {
   evtSource.onmessage = (e) => {
     eventCount++;
     const container = document.getElementById('events');
-    if (eventCount === 1) container.replaceChildren(); // clear "waiting" message
-    const row = el('div', {style:{padding:'4px 0',fontSize:'13px',fontFamily:'var(--mono)',color:'var(--text-dim)',borderBottom:'1px solid var(--border)'}}, [
-      el('span', {style:{color:'var(--accent)'}, text:'#' + (e.lastEventId || eventCount)}),
-      document.createTextNode(' ' + e.data),
-    ]);
-    container.prepend(row);
+    if (eventCount === 1) container.replaceChildren();
+
+    // Parse structured event for rich display.
+    let display;
+    try {
+      const evt = JSON.parse(e.data);
+      const k = evt.kind || {};
+      const type = k.type || 'event';
+      const colors = {
+        Commit: 'var(--green)', Merge: 'var(--purple)', PipelineCompleted: k.passed ? 'var(--green)' : 'var(--red)',
+        GoalCreated: 'var(--yellow)', ApproachCreated: 'var(--accent)', Promoted: 'var(--green)',
+        GoalAbandoned: 'var(--text-dim)', AgentProvisioned: 'var(--accent)',
+      };
+      const summaries = {
+        Commit: k.message ? (k.branch||'') + ' ' + k.message : '',
+        Merge: (k.from||'') + ' \u2192 ' + (k.into||''),
+        PipelineCompleted: (k.pipeline||'') + ' ' + (k.passed?'PASSED':'FAILED') + ' (' + ((k.duration_ms||0)/1000).toFixed(1) + 's)',
+        GoalCreated: k.description || '',
+        ApproachCreated: (k.approach||'') + ' by ' + (k.agent||'').slice(0,8),
+        Promoted: (k.approach||'') + ' \u2192 merged',
+        GoalAbandoned: k.goal_id || '',
+        AgentProvisioned: k.name || '',
+      };
+      display = el('div', {style:{padding:'5px 0',fontSize:'13px',borderBottom:'1px solid var(--border)',display:'flex',gap:'8px',alignItems:'center'}}, [
+        el('span', {style:{color:'var(--text-dim)',fontSize:'11px',minWidth:'50px'}, text:'#' + (e.lastEventId || eventCount)}),
+        el('span', {style:{color:colors[type]||'var(--text-dim)',fontWeight:'600',minWidth:'80px',fontSize:'12px'}, text:type}),
+        el('span', {style:{color:'var(--text)',fontSize:'13px'}, text:summaries[type] || JSON.stringify(k)}),
+      ]);
+    } catch {
+      display = el('div', {style:{padding:'4px 0',fontSize:'13px',fontFamily:'var(--mono)',color:'var(--text-dim)',borderBottom:'1px solid var(--border)'}}, [
+        el('span', {style:{color:'var(--accent)'}, text:'#' + (e.lastEventId || eventCount)}),
+        document.createTextNode(' ' + e.data),
+      ]);
+    }
+    container.prepend(display);
     while (container.children.length > 50) container.removeChild(container.lastChild);
     loadOverview();
   };
