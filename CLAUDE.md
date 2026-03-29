@@ -6,7 +6,7 @@ This is a forge-managed project. Use `forge` commands, NOT git.
 
 ```bash
 cargo build --release          # Release binary at target/release/forge
-cargo test                     # All tests (119: unit, property, integration, e2e)
+cargo test                     # All tests (129: unit, property, integration, e2e)
 cargo test -p gritgrub-store --test integration  # Repository integration tests
 cargo test -p gritgrub-cli --test e2e            # CLI + server E2E tests
 cargo test -p gritgrub-core                       # Property + unit tests
@@ -50,6 +50,12 @@ forge serve                     # start gRPC server (auto-TLS)
 forge serve --http-addr :8080   # also start HTTP/JSON gateway
 forge clone <url> <path>        # like git clone
 forge log --graph --oneline     # like git log --graph --oneline
+forge explore create "goal"     # create exploration goal
+forge explore approach <id> --name <n>  # create approach branch
+forge explore list              # list active explorations
+forge explore show <id>         # detailed goal status
+forge explore promote <id> --approach <n>  # merge winner
+forge explore abandon <id>      # clean up exploration
 forge collab spawn --task "..." # spawn agent on a branch
 forge collab list               # list active agent tasks
 forge collab review <branch>    # review agent's work

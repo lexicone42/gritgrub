@@ -620,3 +620,180 @@ fn config_missing_returns_none() {
     let (_dir, repo, _id) = fresh_repo();
     assert_eq!(repo.get_config("nonexistent").unwrap(), None);
 }
+
+// ── Exploration Tree ────────────────────────────────────────────
+
+fn make_goal(author: IdentityId) -> Goal {
+    Goal {
+        description: "Add rate limiting to the API".to_string(),
+        target_branch: "main".to_string(),
+        constraints: vec![
+            Constraint {
+                kind: ConstraintKind::TestsPass,
+                description: "all tests must pass".to_string(),
+                check_command: None,
+            },
+        ],
+        created_by: author,
+        created_at: 1_000_000,
+        max_approaches: 0,
+        time_budget_secs: 0,
+    }
+}
+
+/// Helper: create a repo with an initial commit so explore can branch from it.
+fn repo_with_commit() -> (TempDir, Repository, IdentityId) {
+    let (dir, repo, id) = fresh_repo();
+    // Create a file and commit so main has a tip.
+    std::fs::write(dir.path().join("README.md"), b"hello").unwrap();
+    repo.commit("initial commit", id, None).unwrap();
+    (dir, repo, id)
+}
+
+#[test]
+fn create_goal_and_list() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+
+    let goals = repo.list_goals().unwrap();
+    assert_eq!(goals.len(), 1);
+    assert_eq!(goals[0].0, goal_id);
+    assert_eq!(goals[0].1.description, "Add rate limiting to the API");
+}
+
+#[test]
+fn create_goal_duplicate_fails() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    repo.create_goal(&goal).unwrap();
+    // Same goal → same blob → same ref → CAS fails.
+    assert!(repo.create_goal(&goal).is_err());
+}
+
+#[test]
+fn create_approach_and_summary() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+
+    repo.create_approach(&goal_id, "token-bucket", id).unwrap();
+    repo.create_approach(&goal_id, "leaky-bucket", id).unwrap();
+
+    let summary = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(summary.approaches.len(), 2);
+
+    let names: Vec<&str> = summary.approaches.iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert!(names.contains(&"token-bucket"));
+    assert!(names.contains(&"leaky-bucket"));
+}
+
+#[test]
+fn approach_duplicate_name_fails() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+
+    repo.create_approach(&goal_id, "same-name", id).unwrap();
+    assert!(repo.create_approach(&goal_id, "same-name", id).is_err());
+}
+
+#[test]
+fn approach_for_nonexistent_goal_fails() {
+    let (_dir, repo, id) = repo_with_commit();
+    let fake_id = ObjectId::from_bytes([0xAB; 32]);
+    assert!(repo.create_approach(&fake_id, "anything", id).is_err());
+}
+
+#[test]
+fn claim_and_release() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+    repo.create_approach(&goal_id, "approach-a", id).unwrap();
+
+    // Claim is created automatically by create_approach.
+    let summary = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(summary.claims.len(), 1);
+    assert_eq!(summary.claims[0].approach, "approach-a");
+
+    // Release it.
+    repo.release_claim(&goal_id, id).unwrap();
+    let summary = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(summary.claims.len(), 0);
+}
+
+#[test]
+fn refresh_claim_increments_heartbeat() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+    repo.create_approach(&goal_id, "approach-a", id).unwrap();
+
+    // Initial heartbeat is 0.
+    let s1 = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(s1.claims[0].heartbeat, 0);
+
+    // Refresh.
+    repo.refresh_claim(&goal_id, id).unwrap();
+    let s2 = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(s2.claims[0].heartbeat, 1);
+}
+
+#[test]
+fn promote_approach_fast_forward() {
+    let (dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+    repo.create_approach(&goal_id, "winner", id).unwrap();
+
+    // Simulate agent work: add a file and create a changeset on the approach.
+    let approach_ref = gritgrub_core::exploration::refs::approach_tip(&goal_id, "winner");
+    let _approach_tip = repo.resolve_ref(&approach_ref).unwrap().unwrap();
+
+    // Create a new file, snapshot via commit (which updates HEAD/main),
+    // then manually move the approach ref to the new commit.
+    std::fs::write(dir.path().join("rate_limit.rs"), b"pub fn limit() {}").unwrap();
+    let cs_id = repo.commit("add rate limiting", id, None).unwrap();
+    // Move the approach ref to the new commit (main also moved, which is fine
+    // for this test — promote will be a no-op fast-forward).
+    repo.set_ref(&approach_ref, &Ref::Direct(cs_id)).unwrap();
+
+    // Promote — should fast-forward since main hasn't moved.
+    let result = repo.promote_approach(&goal_id, "winner", id).unwrap();
+    assert!(matches!(result, PromoteResult::FastForward(_)));
+
+    // main should now point to our commit.
+    let main_tip = repo.resolve_ref("refs/heads/main").unwrap().unwrap();
+    assert_eq!(main_tip, cs_id);
+}
+
+#[test]
+fn abandon_goal_cleans_refs() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+    repo.create_approach(&goal_id, "approach-a", id).unwrap();
+    repo.create_approach(&goal_id, "approach-b", id).unwrap();
+
+    let count = repo.abandon_goal(&goal_id).unwrap();
+    assert!(count >= 4); // meta + target + 2 approaches + claims
+
+    let goals = repo.list_goals().unwrap();
+    assert_eq!(goals.len(), 0);
+}
+
+#[test]
+fn max_approaches_enforced() {
+    let (_dir, repo, id) = repo_with_commit();
+    let mut goal = make_goal(id);
+    goal.max_approaches = 2;
+    let goal_id = repo.create_goal(&goal).unwrap();
+
+    repo.create_approach(&goal_id, "a", id).unwrap();
+    repo.create_approach(&goal_id, "b", id).unwrap();
+    // Third should fail.
+    assert!(repo.create_approach(&goal_id, "c", id).is_err());
+}

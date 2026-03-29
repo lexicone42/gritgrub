@@ -25,3 +25,4 @@ pub mod config;
 pub mod stash;
 pub mod reset;
 pub mod collab;
+pub mod explore;

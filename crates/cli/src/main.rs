@@ -197,6 +197,12 @@ enum Commands {
         action: CollabAction,
     },
 
+    /// Exploration tree — structured parallel search over solution spaces
+    Explore {
+        #[command(subcommand)]
+        action: ExploreAction,
+    },
+
     /// Start the gRPC + HTTP server
     Serve {
         /// Override gRPC listen address
@@ -379,6 +385,55 @@ enum CollabAction {
 }
 
 #[derive(Subcommand)]
+enum ExploreAction {
+    /// Create a new exploration goal
+    Create {
+        /// What are we trying to achieve?
+        description: String,
+        /// Target branch to merge the winner into (default: main)
+        #[arg(long, default_value = "main")]
+        target: String,
+        /// Maximum concurrent approaches (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        max_approaches: u32,
+        /// Time budget in seconds (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        time_budget: u64,
+        /// Constraints (repeatable): "tests:all tests must pass", "lint:no warnings"
+        #[arg(long, short)]
+        constraint: Vec<String>,
+    },
+    /// Create a new approach for a goal
+    Approach {
+        /// Goal ID prefix
+        goal: String,
+        /// Approach name
+        #[arg(long)]
+        name: String,
+    },
+    /// List all active exploration goals
+    List,
+    /// Show detailed status of a goal
+    Show {
+        /// Goal ID prefix
+        goal: String,
+    },
+    /// Promote the winning approach into the target branch
+    Promote {
+        /// Goal ID prefix
+        goal: String,
+        /// Approach name to promote
+        #[arg(long)]
+        approach: String,
+    },
+    /// Abandon a goal and clean up refs
+    Abandon {
+        /// Goal ID prefix
+        goal: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentAction {
     /// Write a scratchpad entry
     Write {
@@ -494,6 +549,20 @@ fn main() -> Result<()> {
             StashAction::List => commands::stash::list(),
         },
         Commands::Reset { target, hard } => commands::reset::run(&target, hard),
+        Commands::Explore { action } => match action {
+            ExploreAction::Create { description, target, max_approaches, time_budget, constraint } => {
+                commands::explore::create(&description, &target, max_approaches, time_budget, &constraint)
+            }
+            ExploreAction::Approach { goal, name } => {
+                commands::explore::approach(&goal, &name)
+            }
+            ExploreAction::List => commands::explore::list(),
+            ExploreAction::Show { goal } => commands::explore::show(&goal),
+            ExploreAction::Promote { goal, approach } => {
+                commands::explore::promote(&goal, &approach)
+            }
+            ExploreAction::Abandon { goal } => commands::explore::abandon(&goal),
+        },
         Commands::Serve { addr, http_addr, config, init_config } => {
             commands::serve::run(addr.as_deref(), http_addr.as_deref(), config.as_deref(), init_config)
         }

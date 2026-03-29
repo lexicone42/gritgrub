@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use gritgrub_core::*;
 use gritgrub_core::attestation::*;
+use gritgrub_core::exploration;
 use crate::backend::{ObjectStore, RefStore, ConfigStore, IdentityStore, EventStore, RevocationStore};
 use crate::redb_backend::RedbBackend;
 
@@ -1314,6 +1315,413 @@ impl Repository {
         }
         entries.sort_by_key(|(idx, _)| *idx);
         Ok(entries)
+    }
+
+    // ── Exploration tree ─────────────────────────────────────────────
+
+    /// Create a new exploration goal. Returns the goal's content-addressed ID.
+    ///
+    /// Stores the goal as a JSON Blob and creates refs for the goal metadata
+    /// and target branch. Agents can then create approaches under this goal.
+    pub fn create_goal(&self, goal: &Goal) -> Result<ObjectId> {
+        let json = serde_json::to_vec(goal)
+            .context("failed to serialize goal")?;
+        let blob = Object::Blob(Blob { data: json });
+        let goal_id = self.put_object(&blob)?;
+
+        // Create the meta ref (CAS: must not already exist).
+        let meta_ref = exploration::refs::goal_meta(&goal_id);
+        if !self.backend.cas_ref(&meta_ref, None, &Ref::Direct(goal_id))? {
+            bail!("goal already exists: {}", &goal_id.to_hex()[..16]);
+        }
+
+        // Store the target branch as a symbolic ref.
+        let target_ref = exploration::refs::goal_target(&goal_id);
+        let target = format!("refs/heads/{}", goal.target_branch);
+        self.backend.set_ref(&target_ref, &Ref::Symbolic(target))?;
+
+        Ok(goal_id)
+    }
+
+    /// Create a new approach branch for a goal. Returns the approach ref name.
+    ///
+    /// The approach branch starts from the current tip of the goal's target
+    /// branch (e.g., main). Agents commit to this branch independently.
+    pub fn create_approach(
+        &self,
+        goal_id: &ObjectId,
+        name: &str,
+        agent: IdentityId,
+    ) -> Result<String> {
+        // Verify goal exists.
+        let meta_ref = exploration::refs::goal_meta(goal_id);
+        if self.backend.get_ref(&meta_ref)?.is_none() {
+            bail!("goal not found: {}", &goal_id.to_hex()[..16]);
+        }
+
+        // Read the goal to check max_approaches.
+        let goal = self.get_goal(goal_id)?
+            .ok_or_else(|| anyhow::anyhow!("goal metadata blob missing"))?;
+        if goal.max_approaches > 0 {
+            let prefix = exploration::refs::approaches_prefix(goal_id);
+            let existing = self.backend.list_refs(&prefix)?;
+            if existing.len() >= goal.max_approaches as usize {
+                bail!(
+                    "goal has reached max approaches ({}) — promote or abandon before adding more",
+                    goal.max_approaches
+                );
+            }
+        }
+
+        // Start the approach from the target branch tip.
+        let target_ref = exploration::refs::goal_target(goal_id);
+        let base = match self.backend.get_ref(&target_ref)? {
+            Some(Ref::Symbolic(branch)) => self.resolve_ref(&branch)?,
+            Some(Ref::Direct(id)) => Some(id),
+            None => None,
+        };
+
+        let approach_ref = exploration::refs::approach_tip(goal_id, name);
+        if let Some(base_id) = base {
+            if !self.backend.cas_ref(&approach_ref, None, &Ref::Direct(base_id))? {
+                bail!("approach '{}' already exists for this goal", name);
+            }
+        } else {
+            // No target branch tip yet — create approach ref pointing to nothing.
+            // The first commit on this approach will set it.
+            bail!("target branch has no commits — commit to {} first", goal.target_branch);
+        }
+
+        // Create a claim for this agent.
+        self.claim_approach(goal_id, name, agent, "")?;
+
+        Ok(approach_ref)
+    }
+
+    /// Claim an approach for an agent (with TTL-based heartbeat).
+    pub fn claim_approach(
+        &self,
+        goal_id: &ObjectId,
+        approach: &str,
+        agent: IdentityId,
+        intent: &str,
+    ) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock before UNIX epoch")?
+            .as_micros() as i64;
+
+        let claim = Claim {
+            agent,
+            approach: approach.to_string(),
+            expires_at: now + (DEFAULT_CLAIM_TTL_SECS as i64 * 1_000_000),
+            intent: intent.to_string(),
+            heartbeat: 0,
+        };
+
+        let json = serde_json::to_vec(&claim)?;
+        let blob = Object::Blob(Blob { data: json });
+        let claim_id = self.put_object(&blob)?;
+
+        let claim_ref = exploration::refs::agent_claim(goal_id, &agent);
+        // Force-set: agent can always update its own claim.
+        self.backend.set_ref(&claim_ref, &Ref::Direct(claim_id))?;
+        Ok(())
+    }
+
+    /// Refresh an agent's claim (heartbeat). Extends the TTL.
+    pub fn refresh_claim(
+        &self,
+        goal_id: &ObjectId,
+        agent: IdentityId,
+    ) -> Result<()> {
+        let claim_ref = exploration::refs::agent_claim(goal_id, &agent);
+        let current = self.backend.get_ref(&claim_ref)?
+            .ok_or_else(|| anyhow::anyhow!("no active claim for this agent"))?;
+
+        if let Ref::Direct(blob_id) = current {
+            if let Some(Object::Blob(blob)) = self.get_object(&blob_id)? {
+                let mut claim: Claim = serde_json::from_slice(&blob.data)?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .context("system clock before UNIX epoch")?
+                    .as_micros() as i64;
+                claim.expires_at = now + (DEFAULT_CLAIM_TTL_SECS as i64 * 1_000_000);
+                claim.heartbeat += 1;
+
+                let json = serde_json::to_vec(&claim)?;
+                let new_blob = Object::Blob(Blob { data: json });
+                let new_id = self.put_object(&new_blob)?;
+                self.backend.set_ref(&claim_ref, &Ref::Direct(new_id))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release an agent's claim on an approach.
+    pub fn release_claim(
+        &self,
+        goal_id: &ObjectId,
+        agent: IdentityId,
+    ) -> Result<()> {
+        let claim_ref = exploration::refs::agent_claim(goal_id, &agent);
+        self.backend.delete_ref(&claim_ref)?;
+        Ok(())
+    }
+
+    /// Read a goal's metadata from the store.
+    pub fn get_goal(&self, goal_id: &ObjectId) -> Result<Option<Goal>> {
+        match self.get_object(goal_id)? {
+            Some(Object::Blob(blob)) => {
+                let goal: Goal = serde_json::from_slice(&blob.data)
+                    .context("failed to deserialize goal")?;
+                Ok(Some(goal))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// List all active goals.
+    pub fn list_goals(&self) -> Result<Vec<(ObjectId, Goal)>> {
+        let refs = self.backend.list_refs(exploration::refs::EXPLORE_PREFIX)?;
+        let mut goals = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (name, reference) in &refs {
+            // Match refs ending in "//meta".
+            if name.ends_with("//meta") {
+                if let Ref::Direct(blob_id) = reference {
+                    if seen.insert(*blob_id) {
+                        if let Some(goal) = self.get_goal(blob_id)? {
+                            goals.push((*blob_id, goal));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(goals)
+    }
+
+    /// Get a complete summary of a goal's exploration state.
+    pub fn goal_summary(&self, goal_id: &ObjectId) -> Result<GoalSummary> {
+        let goal = self.get_goal(goal_id)?
+            .ok_or_else(|| anyhow::anyhow!("goal not found"))?;
+
+        // Read approaches.
+        let approach_prefix = exploration::refs::approaches_prefix(goal_id);
+        let approach_refs = self.backend.list_refs(&approach_prefix)?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock before UNIX epoch")?
+            .as_micros() as i64;
+
+        let mut approaches = Vec::new();
+        for (name, reference) in &approach_refs {
+            let approach_name = name.strip_prefix(&approach_prefix)
+                .unwrap_or(name)
+                .to_string();
+
+            let (tip, latest_message, created_by, count) = match reference {
+                Ref::Direct(id) => {
+                    match self.get_object(id)? {
+                        Some(Object::Changeset(cs)) => {
+                            let count = self.approach_depth(id)?;
+                            (Some(*id), Some(cs.message.clone()), Some(cs.author), count)
+                        }
+                        _ => (Some(*id), None, None, 0),
+                    }
+                }
+                _ => (None, None, None, 0),
+            };
+
+            approaches.push(ApproachSummary {
+                name: approach_name,
+                tip,
+                changeset_count: count,
+                latest_message,
+                created_by,
+                verification: VerificationLevel::Unknown, // TODO: compute from attestations
+            });
+        }
+
+        // Read claims (filter out expired).
+        let claims_prefix = exploration::refs::claims_prefix(goal_id);
+        let claim_refs = self.backend.list_refs(&claims_prefix)?;
+        let mut claims = Vec::new();
+        for (_name, reference) in &claim_refs {
+            if let Ref::Direct(blob_id) = reference {
+                if let Some(Object::Blob(blob)) = self.get_object(blob_id)? {
+                    if let Ok(claim) = serde_json::from_slice::<Claim>(&blob.data) {
+                        if claim.expires_at > now {
+                            claims.push(claim);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if promoted.
+        let promoted_ref = exploration::refs::goal_promoted(goal_id);
+        let promoted = self.backend.get_ref(&promoted_ref)?.is_some();
+        let promoted_name = if promoted {
+            // Find which approach was promoted by checking which tip matches.
+            // (Simple heuristic: could also store this explicitly.)
+            None // TODO: store approach name in promoted metadata
+        } else {
+            None
+        };
+
+        Ok(GoalSummary {
+            goal,
+            goal_id: *goal_id,
+            approaches,
+            claims,
+            promoted: promoted_name,
+        })
+    }
+
+    /// Count how many changesets deep an approach is from its base.
+    fn approach_depth(&self, tip: &ObjectId) -> Result<usize> {
+        let mut count = 0;
+        let mut current = Some(*tip);
+        while let Some(id) = current {
+            count += 1;
+            if count > 1000 {
+                break; // Safety limit.
+            }
+            match self.get_object(&id)? {
+                Some(Object::Changeset(cs)) => {
+                    current = cs.parents.first().copied();
+                }
+                _ => break,
+            }
+        }
+        Ok(count)
+    }
+
+    /// Promote an approach: merge it into the goal's target branch.
+    ///
+    /// This is the convergence step — the exploration tree collapses
+    /// into a single winning changeset on the target branch.
+    pub fn promote_approach(
+        &self,
+        goal_id: &ObjectId,
+        approach_name: &str,
+        author: IdentityId,
+    ) -> Result<PromoteResult> {
+        let goal = self.get_goal(goal_id)?
+            .ok_or_else(|| anyhow::anyhow!("goal not found"))?;
+
+        // Get the approach tip.
+        let approach_ref = exploration::refs::approach_tip(goal_id, approach_name);
+        let approach_tip = self.resolve_ref(&approach_ref)?
+            .ok_or_else(|| anyhow::anyhow!("approach '{}' not found", approach_name))?;
+
+        // Get the target branch tip.
+        let target_branch = format!("refs/heads/{}", goal.target_branch);
+        let target_tip = self.resolve_ref(&target_branch)?;
+
+        let result = match target_tip {
+            None => {
+                // Target branch empty — just point it to the approach tip.
+                self.backend.set_ref(&target_branch, &Ref::Direct(approach_tip))?;
+                PromoteResult::FastForward(approach_tip)
+            }
+            Some(target_id) if target_id == approach_tip => {
+                // Already up to date.
+                PromoteResult::FastForward(approach_tip)
+            }
+            Some(target_id) => {
+                // Check if approach is a descendant of target (fast-forward).
+                if self.is_ancestor(&target_id, &approach_tip)? {
+                    self.backend.cas_ref(
+                        &target_branch,
+                        Some(&Ref::Direct(target_id)),
+                        &Ref::Direct(approach_tip),
+                    )?;
+                    PromoteResult::FastForward(approach_tip)
+                } else {
+                    // Need a merge.
+                    let base_id = self.find_merge_base(&target_id, &approach_tip)?
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "no common ancestor between target and approach"
+                        ))?;
+
+                    let base_tree = self.changeset_tree(&base_id)?;
+                    let target_tree = self.changeset_tree(&target_id)?;
+                    let approach_tree = self.changeset_tree(&approach_tip)?;
+
+                    let mut conflicts = Vec::new();
+                    let merged_tree_id = self.merge_trees(
+                        &base_tree, &target_tree, &approach_tree,
+                        &mut conflicts, String::new(),
+                    )?;
+
+                    if !conflicts.is_empty() {
+                        return Ok(PromoteResult::Conflict(conflicts));
+                    }
+
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .context("system clock before UNIX epoch")?
+                        .as_micros() as i64;
+
+                    let changeset = Changeset {
+                        parents: vec![target_id, approach_tip],
+                        tree: merged_tree_id,
+                        author,
+                        timestamp,
+                        message: format!(
+                            "Promote exploration '{}' from goal {}",
+                            approach_name,
+                            &goal_id.to_hex()[..12],
+                        ),
+                        intent: Some(Intent {
+                            kind: IntentKind::Exploration,
+                            affected_paths: vec![],
+                            rationale: format!(
+                                "Promoted approach '{}': {}",
+                                approach_name, goal.description,
+                            ),
+                            context_ref: Some(*goal_id),
+                            verifications: vec![],
+                        }),
+                        metadata: BTreeMap::new(),
+                    };
+
+                    let cs_id = self.put_object(&Object::Changeset(changeset))?;
+                    self.backend.cas_ref(
+                        &target_branch,
+                        Some(&Ref::Direct(target_id)),
+                        &Ref::Direct(cs_id),
+                    )?;
+                    PromoteResult::Merged(cs_id)
+                }
+            }
+        };
+
+        // Mark goal as promoted.
+        let promoted_ref = exploration::refs::goal_promoted(goal_id);
+        self.backend.set_ref(&promoted_ref, &Ref::Direct(approach_tip))?;
+
+        Ok(result)
+    }
+
+    /// Abandon a goal — clean up all exploration refs.
+    /// Objects remain in the store (content-addressed GC is separate).
+    pub fn abandon_goal(&self, goal_id: &ObjectId) -> Result<usize> {
+        let prefix = format!(
+            "{}{}//",
+            exploration::refs::EXPLORE_PREFIX,
+            &goal_id.to_hex()[..16],
+        );
+        let refs = self.backend.list_refs(&prefix)?;
+        let count = refs.len();
+        for (name, _) in &refs {
+            self.backend.delete_ref(name)?;
+        }
+        Ok(count)
     }
 
     // ── Reset ────────────────────────────────────────────────────────
