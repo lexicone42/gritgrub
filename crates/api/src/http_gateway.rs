@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 use std::convert::Infallible;
+use tokio::sync::Notify;
 use axum::{
     Router,
     extract::{Path, Query, State},
@@ -36,6 +37,9 @@ pub struct HttpState {
     pub max_object_size: usize,
     /// Allowed CORS origins (empty = allow all for development).
     pub cors_origins: Vec<String>,
+    /// Notification channel for push-based SSE. Handlers call notify_waiters()
+    /// after mutations so the SSE stream wakes up immediately.
+    pub event_notify: Arc<Notify>,
 }
 
 /// Build the axum Router for the HTTP/JSON gateway.
@@ -338,6 +342,7 @@ async fn put_object(
     let id = state.repo.put_object(&obj)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    state.event_notify.notify_waiters();
     Ok(Json(serde_json::json!({ "id": id.to_string() })))
 }
 
@@ -379,6 +384,9 @@ async fn set_ref(
     Path(name): Path<String>,
     Json(body): Json<SetRefBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate ref name: no traversal, no null bytes, reasonable length.
+    validate_ref_name(&name).map_err(|msg| err(StatusCode::BAD_REQUEST, msg))?;
+
     let auth = validate_request(&state, &headers, true).map_err(|(s, m)| err(s, m))?;
     let (_, scopes) = auth.ok_or_else(|| err(StatusCode::UNAUTHORIZED, "auth required"))?;
     if !scopes.allows_write() {
@@ -400,6 +408,7 @@ async fn set_ref(
     state.repo.set_ref(&name, &reference)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    state.event_notify.notify_waiters();
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -512,6 +521,25 @@ async fn repo_status(
 }
 
 // ── Conversion helpers ─────────────────────────────────────────────
+
+fn validate_ref_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("ref name cannot be empty".into());
+    }
+    if name.len() > 256 {
+        return Err("ref name too long (max 256 chars)".into());
+    }
+    if name.contains('\0') {
+        return Err("ref name cannot contain null bytes".into());
+    }
+    if name.contains("..") {
+        return Err("ref name cannot contain '..'".into());
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err("ref name cannot start or end with '/'".into());
+    }
+    Ok(())
+}
 
 fn parse_object_id(hex: &str) -> Result<ObjectId, (StatusCode, String)> {
     if hex.len() != 64 {
@@ -772,6 +800,7 @@ async fn sse_events(
     validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
 
     let repo = state.repo.clone();
+    let notify = state.event_notify.clone();
     let stream = async_stream::stream! {
         // Start from latest event.
         let mut seq = repo.latest_event_seq().unwrap_or(0);
@@ -785,8 +814,12 @@ async fn sse_events(
                     }
                 }
                 _ => {
-                    // No new events — wait briefly then poll again.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Wait for a mutation notification, or fall back to polling
+                    // every 5 seconds as a safety net.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        notify.notified(),
+                    ).await;
                 }
             }
         }
@@ -994,6 +1027,7 @@ async fn provision_agent(
         (None, None, None)
     };
 
+    state.event_notify.notify_waiters();
     Ok(Json(ProvisionResponse {
         identity: identity.id.to_string(),
         name: agent_name,
@@ -1089,6 +1123,7 @@ async fn provision_batch(
         });
     }
 
+    state.event_notify.notify_waiters();
     Ok(Json(results))
 }
 
@@ -1165,6 +1200,7 @@ async fn create_goal(
     let summary = state.repo.goal_summary(&goal_id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    state.event_notify.notify_waiters();
     Ok(Json(goal_summary_to_response(&summary)))
 }
 

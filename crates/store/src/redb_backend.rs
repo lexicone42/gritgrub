@@ -533,3 +533,68 @@ impl RevocationStore for RedbBackend {
         Ok(table.get(token_hash.as_slice())?.is_some())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_successor_basic() {
+        assert_eq!(prefix_successor("refs/heads/"), "refs/heads0");
+        assert_eq!(prefix_successor("a"), "b");
+        assert_eq!(prefix_successor("abc"), "abd");
+    }
+
+    #[test]
+    fn prefix_successor_slash() {
+        // '/' is 0x2F, successor byte is 0x30 = '0'
+        assert_eq!(prefix_successor("refs/"), "refs0");
+    }
+
+    #[test]
+    fn prefix_successor_empty() {
+        // Empty prefix → no bytes to increment, returns fallback.
+        let result = prefix_successor("");
+        assert_eq!(result, "\u{FFFF}");
+    }
+
+    #[test]
+    fn hex_prefix_to_byte_range_even() {
+        let (start, end) = hex_prefix_to_byte_range("ab").unwrap();
+        assert_eq!(start[0], 0xAB);
+        assert_eq!(start[1], 0x00);
+        assert_eq!(end[0], 0xAC);
+        assert_eq!(end[1], 0x00);
+    }
+
+    #[test]
+    fn hex_prefix_to_byte_range_odd() {
+        let (start, end) = hex_prefix_to_byte_range("abc").unwrap();
+        assert_eq!(start[0], 0xAB);
+        assert_eq!(start[1], 0xC0);
+        assert_eq!(end[0], 0xAB);
+        assert_eq!(end[1], 0xD0);
+    }
+
+    #[test]
+    fn hex_prefix_to_byte_range_full() {
+        let hex = "ab".repeat(32);
+        let (start, end) = hex_prefix_to_byte_range(&hex).unwrap();
+        assert!(start.iter().all(|&b| b == 0xAB));
+        assert_eq!(end[31], 0xAC);
+        assert!(end[..31].iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn hex_prefix_to_byte_range_invalid() {
+        assert!(hex_prefix_to_byte_range("xyz").is_none());
+        assert!(hex_prefix_to_byte_range("").is_none());
+    }
+
+    #[test]
+    fn hex_prefix_to_byte_range_single_char() {
+        let (start, end) = hex_prefix_to_byte_range("a").unwrap();
+        assert_eq!(start[0], 0xA0);
+        assert_eq!(end[0], 0xB0);
+    }
+}
