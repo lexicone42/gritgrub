@@ -34,6 +34,8 @@ pub struct HttpState {
     pub max_token_lifetime_hours: u64,
     /// Maximum object size in bytes (prevents disk exhaustion via HTTP uploads).
     pub max_object_size: usize,
+    /// Allowed CORS origins (empty = allow all for development).
+    pub cors_origins: Vec<String>,
 }
 
 /// Build the axum Router for the HTTP/JSON gateway.
@@ -73,11 +75,20 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/v1/explore/goals", post(create_goal))
         // Dashboard
         .route("/", get(dashboard))
-        // CORS — allow any origin for development, restrict in production via config.
-        .layer(CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers(Any))
+        // CORS — configurable origins for production, allow all for development.
+        .layer({
+            let cors = CorsLayer::new()
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any);
+            if state.cors_origins.is_empty() {
+                cors.allow_origin(Any)
+            } else {
+                let origins: Vec<_> = state.cors_origins.iter()
+                    .filter_map(|o| o.parse().ok())
+                    .collect();
+                cors.allow_origin(origins)
+            }
+        })
         .with_state(state)
 }
 
@@ -754,7 +765,12 @@ async fn get_pipeline_results(
 
 async fn sse_events(
     State(state): State<HttpState>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, (StatusCode, Json<ErrorResponse>)> {
+    // SSE requires auth when require_auth_for_reads is enabled.
+    // Even without auth, rate-limit connections.
+    validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
+
     let repo = state.repo.clone();
     let stream = async_stream::stream! {
         // Start from latest event.
@@ -770,13 +786,13 @@ async fn sse_events(
                 }
                 _ => {
                     // No new events — wait briefly then poll again.
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 // ── Overview endpoint ──────────────────────────────────────────
@@ -826,7 +842,7 @@ async fn overview(
     let goal_list = state.repo.list_goals()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut goals = Vec::new();
-    for (goal_id, _) in &goal_list {
+    for (goal_id, _) in goal_list.iter().take(50) { // Cap at 50 goals for overview.
         if let Ok(summary) = state.repo.goal_summary(goal_id) {
             goals.push(goal_summary_to_response(&summary));
         }
@@ -953,7 +969,8 @@ async fn provision_agent(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "clock error"))?
         .as_micros() as i64;
-    let expiry = now + (body.expiry_hours as i64 * 3_600_000_000);
+    let clamped_hours = body.expiry_hours.min(8760) as i64; // Max 1 year
+    let expiry = now + (clamped_hours * 3_600_000_000);
     let token_scopes = TokenScopes::decode(&body.scope);
     let token = generate_token_v2(identity.id, &kp.signing_key, expiry, &token_scopes);
 
@@ -1014,14 +1031,16 @@ async fn provision_batch(
         return Err(err(StatusCode::BAD_REQUEST, "count must be 1-100"));
     }
 
-    // Find goal.
+    // Find goal (require unique match to prevent wrong-goal assignment).
     let goals = state.repo.list_goals()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let matched: Vec<_> = goals.iter()
         .filter(|(id, _)| id.to_hex().starts_with(&body.goal_id))
         .collect();
-    if matched.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, format!("no goal matching '{}'", body.goal_id)));
+    match matched.len() {
+        0 => return Err(err(StatusCode::NOT_FOUND, format!("no goal matching '{}'", body.goal_id))),
+        1 => {}
+        n => return Err(err(StatusCode::BAD_REQUEST, format!("ambiguous goal prefix '{}': {} matches — use a longer prefix", body.goal_id, n))),
     }
     let (goal_id, _) = matched[0];
 
@@ -1050,7 +1069,8 @@ async fn provision_batch(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "clock error"))?
             .as_micros() as i64;
-        let expiry = now + (body.expiry_hours as i64 * 3_600_000_000);
+        let clamped_hours = body.expiry_hours.min(8760) as i64; // Max 1 year
+    let expiry = now + (clamped_hours * 3_600_000_000);
         let token_scopes = TokenScopes::decode("read,write,attest");
         let token = generate_token_v2(identity.id, &kp.signing_key, expiry, &token_scopes);
 
@@ -1108,6 +1128,14 @@ async fn create_goal(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "clock error"))?
         .as_micros() as i64;
+
+    // Input validation.
+    if body.description.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "description is required"));
+    }
+    if body.description.len() > 10_000 {
+        return Err(err(StatusCode::BAD_REQUEST, "description too long (max 10,000 chars)"));
+    }
 
     let constraints: Vec<Constraint> = body.constraints.iter().map(|c| {
         let kind = match c.kind.as_str() {

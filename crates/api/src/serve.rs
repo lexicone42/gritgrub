@@ -149,6 +149,7 @@ impl ForgeServer {
                 require_auth_for_reads: self.config.auth.require_auth_for_reads,
                 max_token_lifetime_hours: self.config.auth.max_token_lifetime_hours,
                 max_object_size: self.config.limits.max_message_size,
+                cors_origins: vec![], // Empty = allow all (override via config for production).
             };
             let app = http_gateway::router(http_state);
             let listener = tokio::net::TcpListener::bind(http_addr).await
