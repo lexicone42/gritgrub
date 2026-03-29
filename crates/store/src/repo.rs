@@ -5,6 +5,7 @@ use gritgrub_core::*;
 use gritgrub_core::attestation::*;
 use gritgrub_core::exploration;
 use gritgrub_core::pipeline;
+use gritgrub_core::events::{RepoEvent, EventKind};
 use crate::backend::{ObjectStore, RefStore, ConfigStore, IdentityStore, EventStore, RevocationStore};
 use crate::redb_backend::RedbBackend;
 
@@ -375,6 +376,13 @@ impl Repository {
 
         let cs_id = self.put_object(&Object::Changeset(changeset))?;
         self.update_head_cas(parents.first(), &cs_id)?;
+
+        self.emit(EventKind::Commit {
+            id: cs_id.to_string(),
+            message: message.to_string(),
+            branch: self.head_branch().ok().flatten(),
+        }, Some(author));
+
         Ok(cs_id)
     }
 
@@ -870,7 +878,16 @@ impl Repository {
             pipeline::PIPELINE_PREDICATE,
             Predicate::Pipeline(result_value),
         );
-        self.attest(&result.changeset, &statement)
+        let env_id = self.attest(&result.changeset, &statement)?;
+
+        self.emit(EventKind::PipelineCompleted {
+            pipeline: result.pipeline.clone(),
+            changeset_id: result.changeset.to_string(),
+            passed: result.passed,
+            duration_ms: result.duration_ms,
+        }, Some(result.runner));
+
+        Ok(env_id)
     }
 
     /// Find pipeline attestations for a changeset.
@@ -963,6 +980,15 @@ impl Repository {
     /// Get the latest event sequence number.
     pub fn latest_event_seq(&self) -> Result<u64> {
         self.backend.latest_event_seq()
+    }
+
+    /// Emit a structured event. Best-effort — event emission failures
+    /// don't fail the operation that triggered them.
+    fn emit(&self, kind: EventKind, actor: Option<IdentityId>) {
+        let event = RepoEvent::now(kind, actor);
+        if let Ok(json) = serde_json::to_vec(&event) {
+            let _ = self.backend.append_event(&json);
+        }
     }
 
     // ── Token revocation ────────────────────────────────────────────
@@ -1088,6 +1114,11 @@ impl Repository {
         // Fast-forward: theirs is ahead of ours.
         if self.is_ancestor(&ours_id, &theirs_id)? {
             self.update_head_cas(Some(&ours_id), &theirs_id)?;
+            self.emit(EventKind::Merge {
+                into: self.head_branch().ok().flatten().unwrap_or_default(),
+                from: branch_name.to_string(),
+                result_id: theirs_id.to_string(),
+            }, Some(author));
             return Ok(MergeResult::FastForward(theirs_id));
         }
 
@@ -1134,6 +1165,11 @@ impl Repository {
 
         let cs_id = self.put_object(&Object::Changeset(changeset))?;
         self.update_head_cas(Some(&ours_id), &cs_id)?;
+        self.emit(EventKind::Merge {
+            into: self.head_branch().ok().flatten().unwrap_or_default(),
+            from: branch_name.to_string(),
+            result_id: cs_id.to_string(),
+        }, Some(author));
         Ok(MergeResult::Merged(cs_id))
     }
 
@@ -1458,6 +1494,11 @@ impl Repository {
         let target = format!("refs/heads/{}", goal.target_branch);
         self.backend.set_ref(&target_ref, &Ref::Symbolic(target))?;
 
+        self.emit(EventKind::GoalCreated {
+            goal_id: goal_id.to_string(),
+            description: goal.description.clone(),
+        }, Some(goal.created_by));
+
         Ok(goal_id)
     }
 
@@ -1512,6 +1553,12 @@ impl Repository {
 
         // Create a claim for this agent.
         self.claim_approach(goal_id, name, agent, "")?;
+
+        self.emit(EventKind::ApproachCreated {
+            goal_id: goal_id.to_string(),
+            approach: name.to_string(),
+            agent: agent.to_string(),
+        }, Some(agent));
 
         Ok(approach_ref)
     }
@@ -1817,6 +1864,18 @@ impl Repository {
         let promoted_ref = exploration::refs::goal_promoted(goal_id);
         self.backend.set_ref(&promoted_ref, &Ref::Direct(approach_tip))?;
 
+        let result_id = match &result {
+            PromoteResult::FastForward(id) | PromoteResult::Merged(id) => id.to_string(),
+            PromoteResult::Conflict(_) => String::new(),
+        };
+        if !result_id.is_empty() {
+            self.emit(EventKind::Promoted {
+                goal_id: goal_id.to_string(),
+                approach: approach_name.to_string(),
+                result_id,
+            }, Some(author));
+        }
+
         Ok(result)
     }
 
@@ -1833,6 +1892,9 @@ impl Repository {
         for (name, _) in &refs {
             self.backend.delete_ref(name)?;
         }
+        self.emit(EventKind::GoalAbandoned {
+            goal_id: goal_id.to_string(),
+        }, None);
         Ok(count)
     }
 

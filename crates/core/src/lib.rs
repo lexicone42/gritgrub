@@ -10,6 +10,7 @@ pub mod token;
 pub mod policy;
 pub mod exploration;
 pub mod pipeline;
+pub mod events;
 
 pub use id::{ObjectId, IdError};
 pub use object::{Object, Blob, ObjectError};
