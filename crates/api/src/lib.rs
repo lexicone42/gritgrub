@@ -28,3 +28,4 @@ pub use event_service::{EventServer, EventBroadcaster};
 pub use config::ServerConfig;
 pub use serve::ForgeServer;
 pub use client::ForgeClient;
+pub mod agent_sdk;
