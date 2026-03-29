@@ -797,3 +797,190 @@ fn max_approaches_enforced() {
     // Third should fail.
     assert!(repo.create_approach(&goal_id, "c", id).is_err());
 }
+
+// ── Concurrency Stress Tests ────────────────────────────────────
+//
+// These simulate multiple agents hitting the repo simultaneously.
+// redb serializes writes but our CAS logic must handle contention correctly.
+
+#[test]
+fn stress_concurrent_stash_save() {
+    // 12 threads all stash_save at the same time.
+    // CAS loop should ensure no two stashes get the same index.
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let repo = Arc::new(Repository::init(dir.path()).unwrap());
+    let id = repo.local_identity().unwrap();
+
+    // Need a file to stash.
+    fs::write(dir.path().join("work.txt"), "content").unwrap();
+    repo.commit("initial", id, None).unwrap();
+
+    // Create 12 threads that each modify the file and stash.
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let repo = Arc::clone(&repo);
+        let path = dir.path().to_path_buf();
+        handles.push(std::thread::spawn(move || {
+            fs::write(path.join("work.txt"), format!("agent-{}", i)).unwrap();
+            repo.stash_save(&format!("agent {} stash", i))
+        }));
+    }
+
+    let mut successes = 0;
+    let mut indices = std::collections::HashSet::new();
+    for handle in handles {
+        match handle.join().unwrap() {
+            Ok(idx) => {
+                assert!(indices.insert(idx), "duplicate stash index {}!", idx);
+                successes += 1;
+            }
+            Err(_) => {
+                // Some threads may fail with "nothing to stash" if another
+                // thread's stash_save restored the working tree between
+                // their status check and snapshot. That's correct behavior.
+            }
+        }
+    }
+    // At least some should succeed — the first one always does.
+    assert!(successes >= 1, "no stash_save succeeded at all");
+
+    // All successful stashes should have unique indices.
+    let stash_list = repo.stash_list().unwrap();
+    let list_indices: std::collections::HashSet<usize> = stash_list.iter().map(|(i, _)| *i).collect();
+    assert_eq!(list_indices.len(), stash_list.len(), "duplicate indices in stash list");
+}
+
+#[test]
+fn stress_concurrent_object_puts() {
+    // 12 threads all putting objects simultaneously.
+    // Content-addressed = no conflicts, but tests that redb handles
+    // concurrent write transactions without corruption.
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let repo = Arc::new(Repository::init(dir.path()).unwrap());
+
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let repo = Arc::clone(&repo);
+        handles.push(std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for j in 0..50 {
+                let blob = Object::Blob(Blob {
+                    data: format!("agent-{}-blob-{}", i, j).into_bytes(),
+                });
+                let id = repo.put_object(&blob).unwrap();
+                ids.push(id);
+            }
+            ids
+        }));
+    }
+
+    let mut all_ids = std::collections::HashSet::new();
+    for handle in handles {
+        let ids = handle.join().unwrap();
+        assert_eq!(ids.len(), 50);
+        for id in ids {
+            all_ids.insert(id);
+        }
+    }
+
+    // 12 agents * 50 unique blobs = 600 unique objects.
+    assert_eq!(all_ids.len(), 600);
+
+    // Verify all objects are readable.
+    for id in &all_ids {
+        assert!(repo.get_object(id).unwrap().is_some());
+    }
+}
+
+#[test]
+fn stress_concurrent_exploration_approaches() {
+    // 12 threads all creating approaches on the same goal.
+    // CAS ensures no two approaches get the same name
+    // (they have different names by design, but this tests
+    // contention on the ref namespace).
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let repo = Arc::new(Repository::init(dir.path()).unwrap());
+    let id = repo.local_identity().unwrap();
+
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    repo.commit("initial", id, None).unwrap();
+
+    let goal = Goal {
+        description: "stress test goal".to_string(),
+        target_branch: "main".to_string(),
+        constraints: vec![],
+        created_by: id,
+        created_at: 1_000_000,
+        max_approaches: 0,
+        time_budget_secs: 0,
+    };
+    let goal_id = repo.create_goal(&goal).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let repo = Arc::clone(&repo);
+        let gid = goal_id;
+        handles.push(std::thread::spawn(move || {
+            repo.create_approach(&gid, &format!("approach-{}", i), id)
+        }));
+    }
+
+    let mut successes = 0;
+    for handle in handles {
+        if handle.join().unwrap().is_ok() {
+            successes += 1;
+        }
+    }
+
+    // All 12 should succeed — different names, no conflicts.
+    assert_eq!(successes, 12, "some approaches failed under contention");
+
+    let summary = repo.goal_summary(&goal_id).unwrap();
+    assert_eq!(summary.approaches.len(), 12);
+}
+
+#[test]
+fn stress_concurrent_event_log() {
+    // 12 threads appending events simultaneously.
+    // Event sequence numbers must be unique and monotonic.
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let repo = Arc::new(Repository::init(dir.path()).unwrap());
+
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let repo = Arc::clone(&repo);
+        handles.push(std::thread::spawn(move || {
+            let mut seqs = Vec::new();
+            for j in 0..20 {
+                let event = format!("agent-{}-event-{}", i, j);
+                let seq = repo.log_event(event.as_bytes()).unwrap();
+                seqs.push(seq);
+            }
+            seqs
+        }));
+    }
+
+    let mut all_seqs = std::collections::HashSet::new();
+    for handle in handles {
+        let seqs = handle.join().unwrap();
+        assert_eq!(seqs.len(), 20);
+        for seq in seqs {
+            assert!(all_seqs.insert(seq), "duplicate event seq {}!", seq);
+        }
+    }
+
+    // 12 * 20 = 240 events, all with unique sequence numbers.
+    assert_eq!(all_seqs.len(), 240);
+
+    // Verify events are readable.
+    let events = repo.read_events(0, 300).unwrap();
+    assert_eq!(events.len(), 240);
+}

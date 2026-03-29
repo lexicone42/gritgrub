@@ -553,6 +553,110 @@ fn e2e_pull_updates_working_tree() {
     );
 }
 
+// ── Exploration tree CLI ─────────────────────────────────────────
+
+#[test]
+fn cli_explore_create_and_list() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    let out = forge_ok(dir.path(), &[
+        "explore", "create", "Add rate limiting",
+        "--target", "main",
+        "--constraint", "tests:all tests pass",
+    ]);
+    assert!(out.contains("Created exploration goal"));
+    assert!(out.contains("Add rate limiting"));
+
+    let list = forge_ok(dir.path(), &["explore", "list"]);
+    assert!(list.contains("Add rate limiting"));
+    assert!(list.contains("main"));
+}
+
+#[test]
+fn cli_explore_approach_and_show() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    // Create goal — extract goal ID from output.
+    let create_out = forge_ok(dir.path(), &[
+        "explore", "create", "Improve performance",
+    ]);
+    let goal_id = create_out.lines()
+        .find(|l| l.contains("Created exploration goal"))
+        .and_then(|l| l.split_whitespace().last())
+        .unwrap_or("");
+    assert!(!goal_id.is_empty(), "failed to extract goal ID from: {}", create_out);
+
+    // Create approach.
+    let approach_out = forge_ok(dir.path(), &[
+        "explore", "approach", goal_id, "--name", "caching",
+    ]);
+    assert!(approach_out.contains("caching"));
+
+    // Show goal detail.
+    let show_out = forge_ok(dir.path(), &["explore", "show", goal_id]);
+    assert!(show_out.contains("caching"));
+    assert!(show_out.contains("Improve performance"));
+}
+
+#[test]
+fn cli_explore_abandon() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    let create_out = forge_ok(dir.path(), &[
+        "explore", "create", "Dead end experiment",
+    ]);
+    let goal_id = create_out.lines()
+        .find(|l| l.contains("Created exploration goal"))
+        .and_then(|l| l.split_whitespace().last())
+        .unwrap_or("");
+
+    let abandon_out = forge_ok(dir.path(), &["explore", "abandon", goal_id]);
+    assert!(abandon_out.contains("Abandoned"));
+
+    let list = forge_ok(dir.path(), &["explore", "list"]);
+    assert!(list.contains("No active explorations"));
+}
+
+// ── Pipeline CLI ────────────────────────────────────────────────
+
+#[test]
+fn cli_pipeline_define_and_list() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+
+    let out = forge_ok(dir.path(), &[
+        "pipeline", "define", "ci",
+        "--stage", "test",
+        "--stage", "lint",
+    ]);
+    assert!(out.contains("ci"));
+    assert!(out.contains("test"));
+    assert!(out.contains("lint"));
+
+    let list = forge_ok(dir.path(), &["pipeline", "list"]);
+    assert!(list.contains("ci"));
+}
+
+#[test]
+fn cli_pipeline_show_no_results() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    let out = forge_ok(dir.path(), &["pipeline", "show"]);
+    assert!(out.contains("No pipeline results"));
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 /// Extract changeset ID from commit output like "[main abc123def456] message"
