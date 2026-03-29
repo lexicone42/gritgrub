@@ -16,6 +16,90 @@ pub struct RedbBackend {
     db: Database,
 }
 
+/// Convert a hex prefix to a byte range for B-tree range queries on [u8; 32] keys.
+/// Returns (start_key, end_key) where start is the minimum matching key and
+/// end is the minimum non-matching key.
+///
+/// "ab" → ([0xAB, 0, 0, ...], [0xAC, 0, 0, ...])
+/// "abc" → ([0xAB, 0xC0, 0, ...], [0xAB, 0xD0, 0, ...])
+fn hex_prefix_to_byte_range(hex: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    if hex.is_empty() || hex.len() > 64 {
+        return None;
+    }
+    // Pad to even length for byte conversion.
+    let even_hex = if hex.len().is_multiple_of(2) {
+        hex.to_string()
+    } else {
+        format!("{}0", hex)
+    };
+
+    // Parse complete bytes.
+    let mut start_bytes = Vec::with_capacity(32);
+    for i in (0..even_hex.len()).step_by(2) {
+        match u8::from_str_radix(&even_hex[i..i + 2], 16) {
+            Ok(b) => start_bytes.push(b),
+            Err(_) => return None,
+        }
+    }
+
+    // Pad start to 32 bytes with 0x00.
+    while start_bytes.len() < 32 {
+        start_bytes.push(0x00);
+    }
+
+    // Compute end: increment the last significant byte.
+    let mut end_bytes = start_bytes.clone();
+    let significant_len = (even_hex.len() / 2).min(32);
+    // For odd-length hex prefixes, the last byte was padded with 0 in low nibble.
+    // "abc" → 0xAB, 0xC0 — end should be 0xAB, 0xD0 (increment the half-byte).
+    if hex.len() % 2 == 1 {
+        // Odd prefix: increment the high nibble of the last parsed byte.
+        if significant_len > 0 {
+            let idx = significant_len - 1;
+            let high_nibble = (end_bytes[idx] >> 4) + 1;
+            if high_nibble > 0xF {
+                // Carry — increment previous byte.
+                end_bytes[idx] = 0x00;
+                if idx > 0 {
+                    end_bytes[idx - 1] = end_bytes[idx - 1].wrapping_add(1);
+                }
+            } else {
+                end_bytes[idx] = high_nibble << 4;
+            }
+        }
+    } else {
+        // Even prefix: increment the last full byte.
+        if significant_len > 0 {
+            let idx = significant_len - 1;
+            end_bytes[idx] = end_bytes[idx].wrapping_add(1);
+            if end_bytes[idx] == 0 && idx > 0 {
+                // Carry.
+                end_bytes[idx - 1] = end_bytes[idx - 1].wrapping_add(1);
+            }
+        }
+    }
+
+    Some((start_bytes, end_bytes))
+}
+
+/// Compute the lexicographic successor of a string prefix for range queries.
+/// "refs/heads/" → "refs/heads0" (/ is 0x2F, 0 is 0x30).
+/// This lets us do `table.range(prefix..successor)` for O(log n + k) scans.
+fn prefix_successor(prefix: &str) -> String {
+    let mut bytes = prefix.as_bytes().to_vec();
+    // Increment the last byte. If it overflows (0xFF), pop and try the previous byte.
+    while let Some(last) = bytes.pop() {
+        if last < 0xFF {
+            bytes.push(last + 1);
+            return String::from_utf8_lossy(&bytes).to_string();
+        }
+        // Last byte was 0xFF, carry to previous byte.
+    }
+    // All bytes were 0xFF — no successor exists (return something > any string).
+    // In practice this never happens for ref names.
+    "\u{FFFF}".to_string()
+}
+
 impl RedbBackend {
     pub fn create(path: &Path) -> Result<Self> {
         let db = Database::create(path)?;
@@ -85,16 +169,38 @@ impl ObjectStore for RedbBackend {
         let table = tx.open_table(OBJECTS)?;
         let mut results = Vec::new();
 
-        for entry in table.iter()? {
-            let (key, value) = entry?;
-            let key_bytes: [u8; 32] = key.value().try_into()
-                .map_err(|_| anyhow::anyhow!("invalid object key length"))?;
-            let id = ObjectId::from_bytes(key_bytes);
-            if id.to_hex().starts_with(hex_prefix) {
-                let obj = Object::from_tagged_bytes(value.value())?;
-                results.push((id, obj));
-                if results.len() > 1 {
-                    break;
+        // Convert hex prefix to byte range for B-tree range scan.
+        // "ab" → scan from [0xAB, 0x00, ...] to [0xAC, 0x00, ...]
+        // "abc" → scan from [0xAB, 0xC0, ...] to [0xAB, 0xD0, ...]
+        if let Some((start, end)) = hex_prefix_to_byte_range(hex_prefix) {
+            for entry in table.range(start.as_slice()..end.as_slice())? {
+                let (key, value) = entry?;
+                let key_bytes: [u8; 32] = key.value().try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid object key length"))?;
+                let id = ObjectId::from_bytes(key_bytes);
+                // Double-check full hex prefix (byte range is an over-approximation
+                // for odd-length prefixes).
+                if id.to_hex().starts_with(hex_prefix) {
+                    let obj = Object::from_tagged_bytes(value.value())?;
+                    results.push((id, obj));
+                    if results.len() > 1 {
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Invalid hex prefix — fall back to full scan.
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                let key_bytes: [u8; 32] = key.value().try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid object key length"))?;
+                let id = ObjectId::from_bytes(key_bytes);
+                if id.to_hex().starts_with(hex_prefix) {
+                    let obj = Object::from_tagged_bytes(value.value())?;
+                    results.push((id, obj));
+                    if results.len() > 1 {
+                        break;
+                    }
                 }
             }
         }
@@ -143,14 +249,25 @@ impl RefStore for RedbBackend {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(REFS)?;
         let mut refs = Vec::new();
-        for entry in table.iter()? {
-            let (key, value) = entry?;
-            let name = key.value().to_string();
-            if name.starts_with(prefix) {
+
+        if prefix.is_empty() {
+            // No prefix = return all refs.
+            for entry in table.iter()? {
+                let (key, value) = entry?;
                 let reference: Ref = postcard::from_bytes(value.value())?;
-                refs.push((name, reference));
+                refs.push((key.value().to_string(), reference));
+            }
+        } else {
+            // Use B-tree range scan: prefix..prefix_successor.
+            // This is O(log n + k) instead of O(n) full scan.
+            let end = prefix_successor(prefix);
+            for entry in table.range(prefix..end.as_str())? {
+                let (key, value) = entry?;
+                let reference: Ref = postcard::from_bytes(value.value())?;
+                refs.push((key.value().to_string(), reference));
             }
         }
+
         Ok(refs)
     }
 
@@ -222,10 +339,17 @@ impl ConfigStore for RedbBackend {
             Err(e) => return Err(e.into()),
         };
         let mut results = Vec::new();
-        for entry in table.iter()? {
-            let (key, value) = entry?;
-            let k = key.value();
-            if let Some(stripped) = k.strip_prefix(prefix) {
+        if prefix.is_empty() {
+            for entry in table.iter()? {
+                let (key, value) = entry?;
+                results.push((key.value().to_string(), value.value().to_string()));
+            }
+        } else {
+            let end = prefix_successor(prefix);
+            for entry in table.range(prefix..end.as_str())? {
+                let (key, value) = entry?;
+                let k = key.value();
+                let stripped = k.strip_prefix(prefix).unwrap_or(k);
                 results.push((stripped.to_string(), value.value().to_string()));
             }
         }
