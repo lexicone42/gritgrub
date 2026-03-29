@@ -6,6 +6,7 @@
 
 use std::fs;
 use gritgrub_core::*;
+use gritgrub_core::policy::RefPolicy;
 use gritgrub_store::{Repository, MergeResult};
 use tempfile::TempDir;
 
@@ -796,6 +797,299 @@ fn max_approaches_enforced() {
     repo.create_approach(&goal_id, "b", id).unwrap();
     // Third should fail.
     assert!(repo.create_approach(&goal_id, "c", id).is_err());
+}
+
+// ── RBAC: Capability Scopes ─────────────────────────────────────
+
+#[test]
+fn capability_global_covers_everything() {
+    let (_dir, repo, id) = fresh_repo();
+    // Default identity has global admin.
+    assert!(repo.check_permission(
+        &id,
+        &CapabilityScope::Global,
+        Permissions::ADMIN,
+    ).unwrap());
+    assert!(repo.check_permission(
+        &id,
+        &CapabilityScope::Repository("any-repo".into()),
+        Permissions::WRITE,
+    ).unwrap());
+    assert!(repo.check_permission(
+        &id,
+        &CapabilityScope::Branch { repo: "any".into(), pattern: "main".into() },
+        Permissions::DELETE,
+    ).unwrap());
+}
+
+#[test]
+fn capability_read_only_cannot_write() {
+    let (_dir, repo, _admin) = fresh_repo();
+    // Create a read-only identity.
+    let reader = repo.create_identity("reader", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    repo.set_capabilities(&reader.id, &[Capability {
+        scope: CapabilityScope::Global,
+        permissions: Permissions::read_only(),
+        expires_at: None,
+    }]).unwrap();
+
+    assert!(repo.check_permission(&reader.id, &CapabilityScope::Global, Permissions::READ).unwrap());
+    assert!(!repo.check_permission(&reader.id, &CapabilityScope::Global, Permissions::WRITE).unwrap());
+    assert!(!repo.check_permission(&reader.id, &CapabilityScope::Global, Permissions::DELETE).unwrap());
+    assert!(!repo.check_permission(&reader.id, &CapabilityScope::Global, Permissions::ADMIN).unwrap());
+}
+
+#[test]
+fn capability_repo_scope_does_not_cover_other_repos() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    repo.set_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Repository("repo-a".into()),
+        permissions: Permissions::all(),
+        expires_at: None,
+    }]).unwrap();
+
+    // Can access repo-a.
+    assert!(repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Repository("repo-a".into()),
+        Permissions::WRITE,
+    ).unwrap());
+    // Cannot access repo-b.
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Repository("repo-b".into()),
+        Permissions::WRITE,
+    ).unwrap());
+    // Cannot access global.
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Global,
+        Permissions::READ,
+    ).unwrap());
+}
+
+#[test]
+fn capability_branch_scope_glob_matching() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    repo.set_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Branch {
+            repo: "myrepo".into(),
+            pattern: "feature/*".into(),
+        },
+        permissions: Permissions::read_write(),
+        expires_at: None,
+    }]).unwrap();
+
+    // Matches feature/foo.
+    assert!(repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Branch { repo: "myrepo".into(), pattern: "feature/foo".into() },
+        Permissions::WRITE,
+    ).unwrap());
+    // Does NOT match main.
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Branch { repo: "myrepo".into(), pattern: "main".into() },
+        Permissions::WRITE,
+    ).unwrap());
+    // Does NOT match other repo.
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Branch { repo: "other-repo".into(), pattern: "feature/foo".into() },
+        Permissions::WRITE,
+    ).unwrap());
+}
+
+#[test]
+fn capability_expired_is_rejected() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    // Expired 1 hour ago.
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap()
+        .as_micros() as i64 - 3_600_000_000;
+    repo.set_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Global,
+        permissions: Permissions::all(),
+        expires_at: Some(past),
+    }]).unwrap();
+
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Global,
+        Permissions::READ,
+    ).unwrap());
+}
+
+#[test]
+fn capability_non_expired_is_accepted() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    // Expires 1 hour from now.
+    let future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap()
+        .as_micros() as i64 + 3_600_000_000;
+    repo.set_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Global,
+        permissions: Permissions::all(),
+        expires_at: Some(future),
+    }]).unwrap();
+
+    assert!(repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Global,
+        Permissions::READ,
+    ).unwrap());
+}
+
+#[test]
+fn capability_no_caps_means_no_access() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+    // Don't grant any capabilities.
+    assert!(!repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Global,
+        Permissions::READ,
+    ).unwrap());
+}
+
+#[test]
+fn capability_grant_appends_not_replaces() {
+    let (_dir, repo, _admin) = fresh_repo();
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+
+    // Grant read first.
+    repo.grant_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Global,
+        permissions: Permissions::read_only(),
+        expires_at: None,
+    }]).unwrap();
+
+    // Then grant write.
+    repo.grant_capabilities(&agent.id, &[Capability {
+        scope: CapabilityScope::Repository("myrepo".into()),
+        permissions: Permissions(Permissions::WRITE),
+        expires_at: None,
+    }]).unwrap();
+
+    // Should have both.
+    let caps = repo.get_capabilities(&agent.id).unwrap();
+    assert_eq!(caps.len(), 2);
+    assert!(repo.check_permission(&agent.id, &CapabilityScope::Global, Permissions::READ).unwrap());
+    assert!(repo.check_permission(
+        &agent.id,
+        &CapabilityScope::Repository("myrepo".into()),
+        Permissions::WRITE,
+    ).unwrap());
+}
+
+// ── RBAC: Ref Policies ─────────────────────────────────────────
+
+#[test]
+fn ref_policy_forbids_force_push() {
+    let (_dir, repo, id) = repo_with_commit();
+    repo.set_ref_policies(&[RefPolicy {
+        pattern: "refs/heads/main".into(),
+        require_review: false,
+        require_slsa: None,
+        allowed_writers: vec![],
+        forbid_force_push: true,
+    }]).unwrap();
+
+    // Non-force push should be allowed.
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+    let denial = repo.check_ref_policy("refs/heads/main", &id, Some(&cs_id), false).unwrap();
+    assert!(denial.is_none(), "non-force push should be allowed");
+
+    // Force push should be denied.
+    let denial = repo.check_ref_policy("refs/heads/main", &id, Some(&cs_id), true).unwrap();
+    assert!(denial.is_some(), "force push should be denied");
+}
+
+#[test]
+fn ref_policy_allowed_writers_enforced() {
+    let (_dir, repo, id) = repo_with_commit();
+    let other = repo.create_identity("outsider", IdentityKind::Human).unwrap();
+
+    repo.set_ref_policies(&[RefPolicy {
+        pattern: "refs/heads/main".into(),
+        require_review: false,
+        require_slsa: None,
+        allowed_writers: vec![id], // Only `id` can write.
+        forbid_force_push: false,
+    }]).unwrap();
+
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+
+    // Allowed writer can push.
+    let denial = repo.check_ref_policy("refs/heads/main", &id, Some(&cs_id), false).unwrap();
+    assert!(denial.is_none());
+
+    // Other writer is blocked.
+    let denial = repo.check_ref_policy("refs/heads/main", &other.id, Some(&cs_id), false).unwrap();
+    assert!(denial.is_some());
+}
+
+#[test]
+fn ref_policy_pattern_matching() {
+    let (_dir, repo, id) = repo_with_commit();
+    repo.set_ref_policies(&[RefPolicy {
+        pattern: "refs/heads/release/*".into(),
+        require_review: false,
+        require_slsa: None,
+        allowed_writers: vec![],
+        forbid_force_push: true,
+    }]).unwrap();
+
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+
+    // Policy applies to release branches.
+    let denial = repo.check_ref_policy("refs/heads/release/v1", &id, Some(&cs_id), true).unwrap();
+    assert!(denial.is_some(), "force push to release branch should be denied");
+
+    // Policy does NOT apply to main.
+    let denial = repo.check_ref_policy("refs/heads/main", &id, Some(&cs_id), true).unwrap();
+    assert!(denial.is_none(), "policy should not apply to main");
+}
+
+// ── RBAC: Concurrent Capability Stress ──────────────────────────
+
+#[test]
+fn stress_concurrent_capability_grants() {
+    // 12 threads granting different capabilities to the same identity.
+    // Atomic grant must not lose any grants.
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let repo = Arc::new(Repository::init(dir.path()).unwrap());
+    let agent = repo.create_identity("agent", IdentityKind::Agent { runtime: "test".into() }).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..12 {
+        let repo = Arc::clone(&repo);
+        let agent_id = agent.id;
+        handles.push(std::thread::spawn(move || {
+            repo.grant_capabilities(&agent_id, &[Capability {
+                scope: CapabilityScope::Branch {
+                    repo: "repo".into(),
+                    pattern: format!("feature/agent-{}", i),
+                },
+                permissions: Permissions::read_write(),
+                expires_at: None,
+            }]).unwrap();
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // All 12 grants should be present.
+    let caps = repo.get_capabilities(&agent.id).unwrap();
+    assert_eq!(caps.len(), 12, "expected 12 capabilities, got {}", caps.len());
 }
 
 // ── Concurrency Stress Tests ────────────────────────────────────

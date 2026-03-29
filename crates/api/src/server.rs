@@ -395,6 +395,25 @@ impl RepoService for RepoServer {
             None => return Err(Status::invalid_argument("missing new_value")),
         };
 
+        // SE-7: Enforce ref policies (same as SetRef — CasRef must not bypass).
+        let target_id = match &new_ref {
+            Ref::Direct(id) => Some(id),
+            Ref::Symbolic(_) => None,
+        };
+        let is_force = if let Some(new_id) = target_id {
+            match self.repo.resolve_ref(&req.name).map_err(to_status)? {
+                Some(old_id) => old_id != *new_id,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if let Some(denial) = self.repo.check_ref_policy(
+            &req.name, &auth.identity, target_id, is_force
+        ).map_err(to_status)? {
+            return Err(Status::permission_denied(denial.to_string()));
+        }
+
         let success = self.repo.cas_ref(&req.name, expected.as_ref(), &new_ref)
             .map_err(to_status)?;
 
