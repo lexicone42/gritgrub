@@ -6,7 +6,7 @@ This is a forge-managed project. Use `forge` commands, NOT git.
 
 ```bash
 cargo build --release          # Release binary at target/release/forge
-cargo test                     # All tests (129+: unit, property, integration, e2e)
+cargo test                     # All tests (160: unit, property, integration, e2e)
 cargo test -p gritgrub-store --test integration  # Repository integration tests
 cargo test -p gritgrub-cli --test e2e            # CLI + server E2E tests
 cargo test -p gritgrub-core                       # Property + unit tests
@@ -60,6 +60,9 @@ forge explore list              # list active explorations
 forge explore show <id>         # detailed goal status
 forge explore promote <id> --approach <n>  # merge winner
 forge explore abandon <id>      # clean up exploration
+forge provision one --name x    # provision single agent (JSON output)
+forge provision batch --count 5 --goal <id>  # batch provision
+forge watch                     # live event stream (Ctrl+C to stop)
 forge collab spawn --task "..." # spawn agent on a branch
 forge collab list               # list active agent tasks
 forge collab review <branch>    # review agent's work
