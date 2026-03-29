@@ -27,3 +27,5 @@ pub mod reset;
 pub mod collab;
 pub mod explore;
 pub mod pipeline;
+pub mod provision;
+pub mod watch;

@@ -694,6 +694,7 @@ dependencies = [
  "gritgrub-core",
  "gritgrub-store",
  "portpicker",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

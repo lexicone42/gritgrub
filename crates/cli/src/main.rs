@@ -209,6 +209,19 @@ enum Commands {
         action: ExploreAction,
     },
 
+    /// Watch live repository events (Ctrl+C to stop)
+    Watch {
+        /// Start from this event sequence number (default: latest)
+        #[arg(long)]
+        from: Option<u64>,
+    },
+
+    /// Provision agents for an exploration goal
+    Provision {
+        #[command(subcommand)]
+        action: ProvisionAction,
+    },
+
     /// Start the gRPC + HTTP server
     Serve {
         /// Override gRPC listen address
@@ -390,6 +403,51 @@ enum CollabAction {
     Complete {
         /// Branch name
         branch: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProvisionAction {
+    /// Provision a single agent
+    One {
+        /// Agent display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Agent runtime (e.g., claude-code, custom-bot)
+        #[arg(long, default_value = "claude-code")]
+        runtime: String,
+        /// Server URL the agent will connect to
+        #[arg(long, default_value = "https://localhost:50051")]
+        server: String,
+        /// Token expiry in hours
+        #[arg(long, default_value = "24")]
+        expiry_hours: u64,
+        /// Token scopes (default: read,write,attest)
+        #[arg(long, default_value = "read,write,attest")]
+        scope: String,
+        /// Assign to exploration goal (ID prefix)
+        #[arg(long)]
+        goal: Option<String>,
+        /// Approach name (defaults to agent name)
+        #[arg(long)]
+        approach: Option<String>,
+    },
+    /// Provision multiple agents for a goal
+    Batch {
+        /// Number of agents to create
+        #[arg(long, default_value = "3")]
+        count: usize,
+        /// Agent runtime
+        #[arg(long, default_value = "claude-code")]
+        runtime: String,
+        /// Server URL
+        #[arg(long, default_value = "https://localhost:50051")]
+        server: String,
+        /// Token expiry in hours
+        #[arg(long, default_value = "24")]
+        expiry_hours: u64,
+        /// Goal ID prefix (required)
+        goal: String,
     },
 }
 
@@ -585,6 +643,18 @@ fn main() -> Result<()> {
             StashAction::List => commands::stash::list(),
         },
         Commands::Reset { target, hard } => commands::reset::run(&target, hard),
+        Commands::Watch { from } => commands::watch::run(from),
+        Commands::Provision { action } => match action {
+            ProvisionAction::One { name, runtime, server, expiry_hours, scope, goal, approach } => {
+                commands::provision::provision(
+                    name.as_deref(), &runtime, &server, expiry_hours, &scope,
+                    goal.as_deref(), approach.as_deref(),
+                )
+            }
+            ProvisionAction::Batch { count, runtime, server, expiry_hours, goal } => {
+                commands::provision::provision_batch(count, &runtime, &server, expiry_hours, &goal)
+            }
+        },
         Commands::Pipeline { action } => match action {
             PipelineAction::Run { name, id } => {
                 commands::pipeline::run(name.as_deref(), id.as_deref())
