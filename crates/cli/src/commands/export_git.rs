@@ -67,14 +67,13 @@ pub fn run() -> Result<()> {
     }
 
     // Update git branch to point at the latest exported commit.
-    if let Some((forge_id, _)) = to_export.last() {
-        if let Some(git_sha) = forge_to_git.get(forge_id) {
+    if let Some((forge_id, _)) = to_export.last()
+        && let Some(git_sha) = forge_to_git.get(forge_id) {
             let branch = git_current_branch(&root)?;
             let refname = format!("refs/heads/{}", branch);
             git_update_ref(&root, &refname, git_sha)?;
             println!("\ngit {} -> {}", branch, &git_sha[..10.min(git_sha.len())]);
         }
-    }
 
     println!("Exported {} changesets to git", to_export.len());
     Ok(())

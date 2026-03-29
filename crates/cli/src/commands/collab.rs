@@ -107,7 +107,7 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<30} {:<12} {:<18} {}", "BRANCH", "STATUS", "IDENTITY", "TASK");
+    println!("{:<30} {:<12} {:<18} TASK", "BRANCH", "STATUS", "IDENTITY");
     println!("{}", "-".repeat(90));
 
     for (key, identity_id_str) in &all_configs {
@@ -210,18 +210,15 @@ pub fn complete(branch: &str) -> Result<()> {
             let id = IdentityId::from_bytes(*uuid.as_bytes());
             // Update the task status in the scratchpad.
             let task_ref = format!("refs/agent/{}/task", id);
-            if let Some(blob_id) = repo.resolve_ref(&task_ref)? {
-                if let Some(Object::Blob(blob)) = repo.get_object(&blob_id)? {
-                    if let Ok(text) = std::str::from_utf8(&blob.data) {
-                        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) {
+            if let Some(blob_id) = repo.resolve_ref(&task_ref)?
+                && let Some(Object::Blob(blob)) = repo.get_object(&blob_id)?
+                    && let Ok(text) = std::str::from_utf8(&blob.data)
+                        && let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) {
                             v["status"] = serde_json::json!("completed");
                             let updated = Object::Blob(Blob { data: v.to_string().into_bytes() });
                             let new_id = repo.put_object(&updated)?;
                             repo.set_ref(&task_ref, &Ref::Direct(new_id))?;
                         }
-                    }
-                }
-            }
         }
     } else {
         bail!("no agent collaboration found for branch '{}'", branch);

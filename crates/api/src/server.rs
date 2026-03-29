@@ -264,7 +264,7 @@ impl RepoService for RepoServer {
             req.tree.as_ref().ok_or_else(|| Status::invalid_argument("missing tree"))?
         )?;
         let parents: Vec<ObjectId> = req.parents.iter()
-            .map(|p| from_pb_object_id(p))
+            .map(from_pb_object_id)
             .collect::<Result<Vec<_>, _>>()?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -532,7 +532,7 @@ impl RepoService for RepoServer {
 
 fn changeset_to_pb(cs: &Changeset) -> pb::Changeset {
     pb::Changeset {
-        parents: cs.parents.iter().map(|p| to_pb_object_id(p)).collect(),
+        parents: cs.parents.iter().map(to_pb_object_id).collect(),
         tree: Some(to_pb_object_id(&cs.tree)),
         author_id: cs.author.as_bytes().to_vec(),
         timestamp_micros: cs.timestamp,
@@ -555,7 +555,7 @@ fn intent_to_pb(intent: &Intent) -> pb::Intent {
         },
         affected_paths: intent.affected_paths.clone(),
         rationale: intent.rationale.clone(),
-        context_ref: intent.context_ref.as_ref().map(|id| to_pb_object_id(id)),
+        context_ref: intent.context_ref.as_ref().map(to_pb_object_id),
         verifications: intent.verifications.iter().map(|v| pb::Verification {
             kind: match v.kind {
                 VerificationKind::TestPass => pb::VerificationKind::TestPass as i32,

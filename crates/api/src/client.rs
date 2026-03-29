@@ -33,11 +33,10 @@ impl ForgeClient {
 
             // When connecting to an IP address, override the TLS domain name
             // to "localhost" since IP addresses can't be used for SNI.
-            if let Some(host) = extract_host(&url) {
-                if is_ip_address(&host) {
+            if let Some(host) = extract_host(&url)
+                && is_ip_address(&host) {
                     tls = tls.domain_name("localhost");
                 }
-            }
             endpoint = endpoint.tls_config(tls)?;
         }
 

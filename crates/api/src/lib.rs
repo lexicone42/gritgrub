@@ -1,3 +1,6 @@
+// Generated protobuf code and tonic::Status have large variants — not our concern.
+#![allow(clippy::large_enum_variant, clippy::result_large_err, clippy::type_complexity)]
+
 pub mod proto {
     pub mod gritgrub {
         pub mod v1 {

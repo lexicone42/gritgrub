@@ -109,19 +109,15 @@ pub enum StageKind {
 
 /// When a pipeline triggers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Trigger {
     /// Run on every new changeset (local commit).
     OnCommit,
     /// Run when a specific ref pattern is updated.
     OnRefUpdate { pattern: String },
     /// Only run when explicitly invoked.
+    #[default]
     Manual,
-}
-
-impl Default for Trigger {
-    fn default() -> Self {
-        Self::Manual
-    }
 }
 
 // ── Results ─────────────────────────────────────────────────────

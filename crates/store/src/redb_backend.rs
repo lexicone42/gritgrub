@@ -225,8 +225,7 @@ impl ConfigStore for RedbBackend {
         for entry in table.iter()? {
             let (key, value) = entry?;
             let k = key.value();
-            if k.starts_with(prefix) {
-                let stripped = &k[prefix.len()..];
+            if let Some(stripped) = k.strip_prefix(prefix) {
                 results.push((stripped.to_string(), value.value().to_string()));
             }
         }

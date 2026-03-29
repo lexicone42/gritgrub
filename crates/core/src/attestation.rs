@@ -307,9 +307,10 @@ pub enum ArtifactRule {
 }
 
 /// SLSA build levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum SlsaLevel {
     /// No provenance required.
+    #[default]
     L0,
     /// Provenance exists (any signer).
     L1,
@@ -334,12 +335,6 @@ pub struct VerificationResult {
     pub verified: bool,
     /// Whether we found the signer's public key.
     pub key_found: bool,
-}
-
-impl Default for SlsaLevel {
-    fn default() -> Self {
-        SlsaLevel::L0
-    }
 }
 
 impl std::fmt::Display for SlsaLevel {

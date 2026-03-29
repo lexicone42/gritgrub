@@ -126,11 +126,10 @@ impl EventService for EventServer {
                         let event = &repo_event.event;
 
                         // Apply filters (kinds are i32 enums).
-                        if !filter.kinds.is_empty() {
-                            if !filter.kinds.contains(&event.kind) {
+                        if !filter.kinds.is_empty()
+                            && !filter.kinds.contains(&event.kind) {
                                 continue;
                             }
-                        }
 
                         if !filter.branches.is_empty() {
                             let event_branch = match &event.payload {
@@ -138,11 +137,10 @@ impl EventService for EventServer {
                                 Some(pb::event::Payload::RefUpdated(e)) => Some(&e.ref_name),
                                 _ => None,
                             };
-                            if let Some(branch) = event_branch {
-                                if !filter.branches.iter().any(|b| branch.contains(b)) {
+                            if let Some(branch) = event_branch
+                                && !filter.branches.iter().any(|b| branch.contains(b)) {
                                     continue;
                                 }
-                            }
                         }
 
                         if tx.send(Ok(repo_event.event)).await.is_err() {

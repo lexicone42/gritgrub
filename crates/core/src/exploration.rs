@@ -151,9 +151,10 @@ pub struct ApproachSummary {
 /// Monotonic verification levels — each level implies all lower levels.
 /// This is a lattice: the verification level of a changeset is the
 /// meet (greatest lower bound) of its own attestations and its parents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum VerificationLevel {
     /// No verification data.
+    #[default]
     Unknown,
     /// Type-checks / compiles.
     Builds,
@@ -169,11 +170,6 @@ pub enum VerificationLevel {
     SlsaL2,
 }
 
-impl Default for VerificationLevel {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 impl std::fmt::Display for VerificationLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

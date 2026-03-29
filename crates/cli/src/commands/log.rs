@@ -154,11 +154,7 @@ fn run_graph(repo: &Repository, count: usize, show_graph: bool, oneline: bool) -
                     let merge_graph: String = columns.iter().enumerate()
                         .map(|(i, _)| if i == col { "|\\" } else { "| " })
                         .collect::<Vec<_>>().join("");
-                    if oneline {
-                        println!("{}", merge_graph);
-                    } else {
-                        println!("{}", merge_graph);
-                    }
+                    println!("{}", merge_graph);
                     columns.insert(col + 1, *parent);
                 }
             }
@@ -190,11 +186,10 @@ fn walk_all_branches(
         }
     }
     // Also include HEAD in case it's detached.
-    if let Some(head) = repo.resolve_head()? {
-        if !starts.contains(&head) {
+    if let Some(head) = repo.resolve_head()?
+        && !starts.contains(&head) {
             starts.push(head);
         }
-    }
 
     // BFS with timestamp-based priority (most recent first).
     let mut result = Vec::new();
@@ -207,14 +202,11 @@ fn walk_all_branches(
         if !seen.insert(id) {
             continue;
         }
-        match repo.get_object(&id)? {
-            Some(Object::Changeset(cs)) => {
-                for parent in &cs.parents {
-                    queue.push_back(*parent);
-                }
-                all_commits.push((id, cs));
+        if let Some(Object::Changeset(cs)) = repo.get_object(&id)? {
+            for parent in &cs.parents {
+                queue.push_back(*parent);
             }
-            _ => {}
+            all_commits.push((id, cs));
         }
     }
 

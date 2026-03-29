@@ -99,14 +99,13 @@ pub fn run() -> Result<()> {
     }
 
     // Point forge branch at the imported tip.
-    if let Some(latest) = commits.last() {
-        if let Some(&forge_id) = sha_to_forge.get(&latest.hash) {
+    if let Some(latest) = commits.last()
+        && let Some(&forge_id) = sha_to_forge.get(&latest.hash) {
             let branch_ref = format!("refs/heads/{}", git_branch);
             repo.set_ref(&branch_ref, &Ref::Direct(forge_id))?;
             repo.set_ref("HEAD", &Ref::Symbolic(branch_ref))?;
             println!("\n{} -> {}", git_branch, forge_id);
         }
-    }
 
     println!("Imported {} new commits, {} unique blobs", commits.len(), blob_cache.len());
     Ok(())

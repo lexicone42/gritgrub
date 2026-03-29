@@ -218,10 +218,13 @@ fn execute_stage(
                 cmd.arg(arg);
             }
             let output = cmd.output().context("failed to run cargo test")?;
+            // cargo test puts test result lines on stdout, compilation on stderr.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}\n{}", stdout, stderr);
 
             // Parse test summary from cargo output.
-            let (passed_count, failed_count) = parse_test_counts(&stderr);
+            let (passed_count, failed_count) = parse_test_counts(&combined);
             let summary = if failed_count > 0 {
                 format!("{} passed, {} failed", passed_count, failed_count)
             } else {
@@ -325,25 +328,29 @@ fn execute_stage(
 }
 
 /// Parse "N passed; M failed" from cargo test output.
+/// Handles multiple "test result:" lines from multi-crate workspaces.
 fn parse_test_counts(output: &str) -> (u32, u32) {
     let mut total_passed = 0u32;
     let mut total_failed = 0u32;
 
     for line in output.lines() {
-        if line.starts_with("test result:") {
-            // "test result: ok. 26 passed; 0 failed; ..."
-            for part in line.split(';') {
+        // "test result: ok. 26 passed; 0 failed; 0 ignored; ..."
+        // "test result: FAILED. 24 passed; 2 failed; 0 ignored; ..."
+        if line.contains("test result:") {
+            for part in line.split([';', '.']) {
                 let part = part.trim();
-                if part.ends_with("passed") {
-                    if let Some(n) = part.split_whitespace().rev().nth(1) {
-                        total_passed += n.parse::<u32>().unwrap_or(0);
+                if part.ends_with("passed")
+                    && let Some(n) = part.split_whitespace()
+                        .find_map(|w| w.parse::<u32>().ok())
+                    {
+                        total_passed += n;
                     }
-                }
-                if part.ends_with("failed") {
-                    if let Some(n) = part.split_whitespace().rev().nth(1) {
-                        total_failed += n.parse::<u32>().unwrap_or(0);
+                if part.ends_with("failed")
+                    && let Some(n) = part.split_whitespace()
+                        .find_map(|w| w.parse::<u32>().ok())
+                    {
+                        total_failed += n;
                     }
-                }
             }
         }
     }

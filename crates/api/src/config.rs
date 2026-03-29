@@ -16,6 +16,7 @@ use serde::{Serialize, Deserialize};
 /// Complete server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ServerConfig {
     pub listen: ListenConfig,
     pub tls: TlsConfig,
@@ -35,6 +36,7 @@ pub struct ListenConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct TlsConfig {
     /// Enable TLS. When true, cert_path and key_path must be set.
     pub enabled: bool,
@@ -49,6 +51,7 @@ pub struct TlsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AuthConfig {
     /// Require authentication for all RPCs (not just writes).
     pub require_auth_for_reads: bool,
@@ -77,6 +80,7 @@ pub struct LimitsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct RepoConfig {
     /// Path to the repository root. Empty = discover from CWD.
     pub path: String,
@@ -84,17 +88,6 @@ pub struct RepoConfig {
 
 // ── Defaults ───────────────────────────────────────────────────────
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            listen: ListenConfig::default(),
-            tls: TlsConfig::default(),
-            auth: AuthConfig::default(),
-            limits: LimitsConfig::default(),
-            repo: RepoConfig::default(),
-        }
-    }
-}
 
 impl Default for ListenConfig {
     fn default() -> Self {
@@ -105,25 +98,7 @@ impl Default for ListenConfig {
     }
 }
 
-impl Default for TlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cert_path: String::new(),
-            key_path: String::new(),
-            ca_cert_path: String::new(),
-        }
-    }
-}
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            require_auth_for_reads: false,
-            max_token_lifetime_hours: 0,
-        }
-    }
-}
 
 impl Default for LimitsConfig {
     fn default() -> Self {
@@ -138,13 +113,6 @@ impl Default for LimitsConfig {
     }
 }
 
-impl Default for RepoConfig {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-        }
-    }
-}
 
 // ── Loading ────────────────────────────────────────────────────────
 
@@ -195,7 +163,7 @@ impl ServerConfig {
         if let Ok(v) = std::env::var("FORGE_TLS_CA") { self.tls.ca_cert_path = v; }
         if let Ok(v) = std::env::var("FORGE_REPO_PATH") { self.repo.path = v; }
         if let Ok(v) = std::env::var("FORGE_REQUIRE_AUTH") { self.auth.require_auth_for_reads = v == "1" || v == "true"; }
-        if let Ok(v) = std::env::var("FORGE_MAX_MESSAGE_SIZE") { if let Ok(n) = v.parse() { self.limits.max_message_size = n; } }
+        if let Ok(v) = std::env::var("FORGE_MAX_MESSAGE_SIZE") && let Ok(n) = v.parse() { self.limits.max_message_size = n; }
     }
 
     /// Resolve the repo path — use config, then discover from CWD.

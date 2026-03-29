@@ -320,15 +320,13 @@ fn diff_tree_vs_working(repo: &Repository, tree_id: &ObjectId, root: &std::path:
     for path in &status.deleted {
         println!("--- a/{}", path);
         println!("+++ /dev/null");
-        if let Some(id) = find_blob_in_tree(repo, tree_id, path)? {
-            if let Some(Object::Blob(b)) = repo.get_object(&id)? {
-                if let Ok(text) = String::from_utf8(b.data) {
+        if let Some(id) = find_blob_in_tree(repo, tree_id, path)?
+            && let Some(Object::Blob(b)) = repo.get_object(&id)?
+                && let Ok(text) = String::from_utf8(b.data) {
                     for line in text.lines() {
                         println!("-{}", line);
                     }
                 }
-            }
-        }
         println!();
     }
 

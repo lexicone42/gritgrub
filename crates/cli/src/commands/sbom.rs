@@ -95,11 +95,10 @@ pub fn show(changeset_prefix: Option<&str>) -> Result<()> {
             println!("  bom blob:     {}", sbom.bom_ref);
 
             // Print the actual BOM JSON.
-            if let Some(Object::Blob(blob)) = repo.get_object(&sbom.bom_ref)? {
-                if let Ok(json) = std::str::from_utf8(&blob.data) {
+            if let Some(Object::Blob(blob)) = repo.get_object(&sbom.bom_ref)?
+                && let Ok(json) = std::str::from_utf8(&blob.data) {
                     println!("\n{}", json);
                 }
-            }
         }
         _ => println!("Unexpected predicate type in SBOM attestation"),
     }

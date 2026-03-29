@@ -617,9 +617,8 @@ impl Repository {
         let refs = self.list_attestation_refs(changeset_id)?;
         let mut envelopes = Vec::new();
         for (_name, env_id) in refs {
-            match self.get_object(&env_id)? {
-                Some(Object::Envelope(env)) => envelopes.push((env_id, env)),
-                _ => {} // skip corrupt refs
+            if let Some(Object::Envelope(env)) = self.get_object(&env_id)? {
+                envelopes.push((env_id, env));
             }
         }
         Ok(envelopes)
@@ -730,11 +729,10 @@ impl Repository {
 
         for cap in &caps {
             // Skip expired capabilities.
-            if let Some(exp) = cap.expires_at {
-                if now > exp {
+            if let Some(exp) = cap.expires_at
+                && now > exp {
                     continue;
                 }
-            }
             // Check if scope matches.
             if scope_covers(&cap.scope, required_scope) && (cap.permissions.0 & required_perm != 0) {
                 return Ok(true);
@@ -806,8 +804,8 @@ impl Repository {
                     }
                 }
 
-                if let Some(required_slsa) = policy.require_slsa {
-                    if !self.check_slsa_level(cs_id, required_slsa)? {
+                if let Some(required_slsa) = policy.require_slsa
+                    && !self.check_slsa_level(cs_id, required_slsa)? {
                         let actual = if self.check_slsa_level(cs_id, SlsaLevel::L2)? {
                             SlsaLevel::L2
                         } else if self.check_slsa_level(cs_id, SlsaLevel::L1)? {
@@ -821,7 +819,6 @@ impl Repository {
                             actual,
                         }));
                     }
-                }
             }
         }
 
@@ -883,15 +880,12 @@ impl Repository {
         let mut results = Vec::new();
         for (_id, env) in attestations {
             // Try to parse the payload as a Statement with a pipeline predicate.
-            if let Ok(stmt) = serde_json::from_slice::<Statement>(&env.payload) {
-                if stmt.predicate_type == pipeline::PIPELINE_PREDICATE {
-                    if let Predicate::Pipeline(ref value) = stmt.predicate {
-                        if let Ok(pr) = serde_json::from_value::<PipelineResult>(value.clone()) {
+            if let Ok(stmt) = serde_json::from_slice::<Statement>(&env.payload)
+                && stmt.predicate_type == pipeline::PIPELINE_PREDICATE
+                    && let Predicate::Pipeline(ref value) = stmt.predicate
+                        && let Ok(pr) = serde_json::from_value::<PipelineResult>(value.clone()) {
                             results.push(pr);
                         }
-                    }
-                }
-            }
         }
         Ok(results)
     }
@@ -976,13 +970,13 @@ impl Repository {
     /// Revoke a token by its BLAKE3 hash.
     pub fn revoke_token(&self, token: &str) -> Result<()> {
         let hash = blake3::hash(token.as_bytes());
-        self.backend.revoke_token(hash.as_bytes().try_into().unwrap())
+        self.backend.revoke_token(hash.as_bytes())
     }
 
     /// Check if a token is revoked.
     pub fn is_token_revoked(&self, token: &str) -> Result<bool> {
         let hash = blake3::hash(token.as_bytes());
-        self.backend.is_token_revoked(hash.as_bytes().try_into().unwrap())
+        self.backend.is_token_revoked(hash.as_bytes())
     }
 
     // ── Merge ────────────────────────────────────────────────────────
@@ -1323,11 +1317,10 @@ impl Repository {
         let mut remotes = Vec::new();
         for (key, url) in entries {
             // key is "<name>.url" (prefix "remote." already stripped)
-            if let Some(name) = key.strip_suffix(".url") {
-                if !url.is_empty() {
+            if let Some(name) = key.strip_suffix(".url")
+                && !url.is_empty() {
                     remotes.push((name.to_string(), url));
                 }
-            }
         }
         Ok(remotes)
     }
@@ -1386,11 +1379,10 @@ impl Repository {
         };
 
         // Restore working tree to HEAD.
-        if let Some(head) = head_id {
-            if let Some(Object::Changeset(cs)) = self.get_object(&head)? {
+        if let Some(head) = head_id
+            && let Some(Object::Changeset(cs)) = self.get_object(&head)? {
                 self.force_checkout_tree(&cs.tree)?;
             }
-        }
 
         Ok(next_idx)
     }
@@ -1424,8 +1416,8 @@ impl Repository {
         let stash_refs = self.backend.list_refs("refs/stash/")?;
         let mut entries = Vec::new();
         for (name, _) in &stash_refs {
-            if let Some(idx_str) = name.strip_prefix("refs/stash/") {
-                if let Ok(idx) = idx_str.parse::<usize>() {
+            if let Some(idx_str) = name.strip_prefix("refs/stash/")
+                && let Ok(idx) = idx_str.parse::<usize>() {
                     let cs_id = self.resolve_ref(name)?;
                     let msg = if let Some(id) = cs_id {
                         if let Some(Object::Changeset(cs)) = self.get_object(&id)? {
@@ -1438,7 +1430,6 @@ impl Repository {
                     };
                     entries.push((idx, msg));
                 }
-            }
         }
         entries.sort_by_key(|(idx, _)| *idx);
         Ok(entries)
@@ -1566,8 +1557,8 @@ impl Repository {
         let current = self.backend.get_ref(&claim_ref)?
             .ok_or_else(|| anyhow::anyhow!("no active claim for this agent"))?;
 
-        if let Ref::Direct(blob_id) = current {
-            if let Some(Object::Blob(blob)) = self.get_object(&blob_id)? {
+        if let Ref::Direct(blob_id) = current
+            && let Some(Object::Blob(blob)) = self.get_object(&blob_id)? {
                 let mut claim: Claim = serde_json::from_slice(&blob.data)?;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1581,7 +1572,6 @@ impl Repository {
                 let new_id = self.put_object(&new_blob)?;
                 self.backend.set_ref(&claim_ref, &Ref::Direct(new_id))?;
             }
-        }
         Ok(())
     }
 
@@ -1616,15 +1606,12 @@ impl Repository {
 
         for (name, reference) in &refs {
             // Match refs ending in "//meta".
-            if name.ends_with("//meta") {
-                if let Ref::Direct(blob_id) = reference {
-                    if seen.insert(*blob_id) {
-                        if let Some(goal) = self.get_goal(blob_id)? {
+            if name.ends_with("//meta")
+                && let Ref::Direct(blob_id) = reference
+                    && seen.insert(*blob_id)
+                        && let Some(goal) = self.get_goal(blob_id)? {
                             goals.push((*blob_id, goal));
                         }
-                    }
-                }
-            }
         }
         Ok(goals)
     }
@@ -1678,15 +1665,12 @@ impl Repository {
         let claim_refs = self.backend.list_refs(&claims_prefix)?;
         let mut claims = Vec::new();
         for (_name, reference) in &claim_refs {
-            if let Ref::Direct(blob_id) = reference {
-                if let Some(Object::Blob(blob)) = self.get_object(blob_id)? {
-                    if let Ok(claim) = serde_json::from_slice::<Claim>(&blob.data) {
-                        if claim.expires_at > now {
+            if let Ref::Direct(blob_id) = reference
+                && let Some(Object::Blob(blob)) = self.get_object(blob_id)?
+                    && let Ok(claim) = serde_json::from_slice::<Claim>(&blob.data)
+                        && claim.expires_at > now {
                             claims.push(claim);
                         }
-                    }
-                }
-            }
         }
 
         // Check if promoted.
