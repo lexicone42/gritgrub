@@ -11,6 +11,7 @@ pub mod policy;
 pub mod exploration;
 pub mod pipeline;
 pub mod events;
+pub mod capability_token;
 
 pub use id::{ObjectId, IdError};
 pub use object::{Object, Blob, ObjectError};
