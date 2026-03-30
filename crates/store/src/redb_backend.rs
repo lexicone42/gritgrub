@@ -207,6 +207,29 @@ impl ObjectStore for RedbBackend {
 
         Ok(results)
     }
+
+    fn list_all_object_ids(&self) -> Result<Vec<ObjectId>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(OBJECTS)?;
+        let mut ids = Vec::new();
+        for entry in table.iter()? {
+            let (key, _) = entry?;
+            let key_bytes: [u8; 32] = key.value().try_into()
+                .map_err(|_| anyhow::anyhow!("invalid object key length"))?;
+            ids.push(ObjectId::from_bytes(key_bytes));
+        }
+        Ok(ids)
+    }
+
+    fn delete_object(&self, id: &ObjectId) -> Result<bool> {
+        let tx = self.db.begin_write()?;
+        let existed = {
+            let mut table = tx.open_table(OBJECTS)?;
+            table.remove(id.as_bytes().as_slice())?.is_some()
+        };
+        tx.commit()?;
+        Ok(existed)
+    }
 }
 
 // ── RefStore ───────────────────────────────────────────────────────

@@ -799,6 +799,64 @@ fn max_approaches_enforced() {
     assert!(repo.create_approach(&goal_id, "c", id).is_err());
 }
 
+// ── Garbage Collection ──────────────────────────────────────────
+
+#[test]
+fn gc_no_orphans_when_clean() {
+    let (_dir, repo, _id) = repo_with_commit();
+    let (total, deleted) = repo.gc().unwrap();
+    assert!(total > 0);
+    assert_eq!(deleted, 0, "clean repo should have no orphans");
+}
+
+#[test]
+fn gc_deletes_orphaned_objects() {
+    let (_dir, repo, _id) = repo_with_commit();
+    // Create an orphan blob (not referenced by any ref).
+    let orphan = Object::Blob(Blob { data: b"orphan data".to_vec() });
+    let orphan_id = repo.put_object(&orphan).unwrap();
+
+    let (_total, deleted) = repo.gc().unwrap();
+    assert_eq!(deleted, 1, "should delete the orphan blob");
+    assert!(repo.get_object(&orphan_id).unwrap().is_none(), "orphan should be gone");
+}
+
+// ── Tree-to-tree Diff ──────────────────────────────────────────
+
+#[test]
+fn diff_changeset_shows_added_files() {
+    let (dir, repo, id) = repo_with_commit();
+    // Add a new file and commit.
+    fs::write(dir.path().join("new_file.txt"), "hello").unwrap();
+    let cs_id = repo.commit("add new file", id, None).unwrap();
+
+    let diff = repo.diff_changeset(&cs_id).unwrap();
+    assert!(diff.added.contains(&"new_file.txt".to_string()));
+    assert!(diff.modified.is_empty() || diff.modified.iter().all(|p| p != "new_file.txt"));
+}
+
+#[test]
+fn diff_changeset_shows_modified_files() {
+    let (dir, repo, id) = repo_with_commit();
+    // Modify the existing file.
+    fs::write(dir.path().join("README.md"), "updated content").unwrap();
+    let cs_id = repo.commit("update readme", id, None).unwrap();
+
+    let diff = repo.diff_changeset(&cs_id).unwrap();
+    assert!(diff.modified.contains(&"README.md".to_string()));
+}
+
+#[test]
+fn diff_changeset_shows_deleted_files() {
+    let (dir, repo, id) = repo_with_commit();
+    // Delete the file and commit.
+    fs::remove_file(dir.path().join("README.md")).unwrap();
+    let cs_id = repo.commit("delete readme", id, None).unwrap();
+
+    let diff = repo.diff_changeset(&cs_id).unwrap();
+    assert!(diff.deleted.contains(&"README.md".to_string()));
+}
+
 // ── RBAC: Capability Scopes ─────────────────────────────────────
 
 #[test]

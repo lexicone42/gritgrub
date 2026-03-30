@@ -209,6 +209,9 @@ enum Commands {
         action: ExploreAction,
     },
 
+    /// Garbage collect unreachable objects
+    Gc,
+
     /// Watch live repository events (Ctrl+C to stop)
     Watch {
         /// Start from this event sequence number (default: latest)
@@ -643,6 +646,13 @@ fn main() -> Result<()> {
             StashAction::List => commands::stash::list(),
         },
         Commands::Reset { target, hard } => commands::reset::run(&target, hard),
+        Commands::Gc => {
+            let repo = gritgrub_store::Repository::discover(&std::env::current_dir()?)?;
+            let (total, deleted) = repo.gc()?;
+            println!("{} objects total, {} unreachable objects deleted", total, deleted);
+            if deleted == 0 { println!("Nothing to clean up."); }
+            Ok(())
+        },
         Commands::Watch { from } => commands::watch::run(from),
         Commands::Provision { action } => match action {
             ProvisionAction::One { name, runtime, server, expiry_hours, scope, goal, approach } => {

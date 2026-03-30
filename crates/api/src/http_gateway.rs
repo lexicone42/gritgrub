@@ -73,6 +73,8 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/v1/pipeline/{id}", get(get_pipeline_results))
         // Server-Sent Events
         .route("/api/v1/events", get(sse_events))
+        // Diff
+        .route("/api/v1/diff/{id}", get(get_diff))
         // Provisioning (create agents via HTTP)
         .route("/api/v1/provision", post(provision_agent))
         .route("/api/v1/provision/batch", post(provision_batch))
@@ -628,6 +630,29 @@ fn changeset_to_response(id: &ObjectId, cs: &Changeset) -> ChangesetResponse {
             rationale: i.rationale.clone(),
         }),
     }
+}
+
+// ── Diff endpoint ─────────────────────────────────────────────
+
+async fn get_diff(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id_hex): Path<String>,
+) -> Result<Json<gritgrub_store::DiffResult>, (StatusCode, Json<ErrorResponse>)> {
+    validate_request(&state, &headers, false).map_err(|(s, m)| err(s, m))?;
+
+    let id = if id_hex.len() == 64 {
+        parse_object_id(&id_hex).map_err(|(s, m)| err(s, m))?
+    } else {
+        let (found_id, _) = state.repo.find_by_prefix(&id_hex)
+            .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+        found_id
+    };
+
+    let diff = state.repo.diff_changeset(&id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(diff))
 }
 
 // ── Exploration endpoints ──────────────────────────────────────

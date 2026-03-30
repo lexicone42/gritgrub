@@ -53,6 +53,14 @@ fn glob_match_inner(pat: &[u8], txt: &[u8]) -> bool {
     pi == pat.len()
 }
 
+/// Result of a tree-to-tree diff.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct DiffResult {
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+}
+
 /// Result of a merge operation.
 #[derive(Debug)]
 pub enum MergeResult {
@@ -1916,6 +1924,139 @@ impl Repository {
             }
             _ => bail!("target {} is not a changeset", target),
         }
+    }
+
+    // ── Garbage collection ────────────────────────────────────────
+
+    /// Mark-and-sweep garbage collection. Deletes unreachable objects.
+    ///
+    /// Walks all refs to find reachable objects, then deletes any object
+    /// not in the reachable set. Returns (total_objects, deleted_count).
+    pub fn gc(&self) -> Result<(usize, usize)> {
+        // 1. Mark: walk all refs to find reachable objects.
+        let mut reachable = std::collections::HashSet::new();
+        let refs = self.backend.list_refs("")?;
+
+        for (_name, reference) in &refs {
+            if let Ref::Direct(id) = reference {
+                self.mark_reachable(id, &mut reachable)?;
+            }
+        }
+
+        // 2. Sweep: delete unreachable objects.
+        let all_ids = self.backend.list_all_object_ids()?;
+        let total = all_ids.len();
+        let mut deleted = 0;
+
+        for id in &all_ids {
+            if !reachable.contains(id)
+                && self.backend.delete_object(id)? {
+                    deleted += 1;
+                }
+        }
+
+        Ok((total, deleted))
+    }
+
+    /// Recursively mark an object and its children as reachable.
+    fn mark_reachable(
+        &self,
+        id: &ObjectId,
+        reachable: &mut std::collections::HashSet<ObjectId>,
+    ) -> Result<()> {
+        if !reachable.insert(*id) {
+            return Ok(()); // Already visited.
+        }
+        match self.get_object(id)? {
+            Some(Object::Changeset(cs)) => {
+                for parent in &cs.parents {
+                    self.mark_reachable(parent, reachable)?;
+                }
+                self.mark_reachable(&cs.tree, reachable)?;
+            }
+            Some(Object::Tree(tree)) => {
+                for entry in tree.entries.values() {
+                    self.mark_reachable(&entry.id, reachable)?;
+                }
+            }
+            Some(Object::Envelope(_)) | Some(Object::Blob(_)) => {
+                // Leaf objects — no children to mark.
+            }
+            None => {} // Object referenced but missing — skip.
+        }
+        Ok(())
+    }
+
+    // ── Tree-to-tree diff ───────────────────────────────────────────
+
+    /// Diff two tree objects. Returns lists of added, modified, and deleted paths.
+    pub fn diff_trees(
+        &self,
+        old_tree: Option<&ObjectId>,
+        new_tree: &ObjectId,
+    ) -> Result<DiffResult> {
+        let old_entries = match old_tree {
+            Some(id) => self.flatten_tree(id, String::new())?,
+            None => BTreeMap::new(),
+        };
+        let new_entries = self.flatten_tree(new_tree, String::new())?;
+
+        let mut result = DiffResult::default();
+
+        for (path, new_id) in &new_entries {
+            match old_entries.get(path) {
+                None => result.added.push(path.clone()),
+                Some(old_id) if old_id != new_id => result.modified.push(path.clone()),
+                _ => {} // Unchanged.
+            }
+        }
+        for path in old_entries.keys() {
+            if !new_entries.contains_key(path) {
+                result.deleted.push(path.clone());
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Diff a changeset against its first parent.
+    pub fn diff_changeset(&self, cs_id: &ObjectId) -> Result<DiffResult> {
+        match self.get_object(cs_id)? {
+            Some(Object::Changeset(cs)) => {
+                let parent_tree = cs.parents.first()
+                    .and_then(|pid| self.changeset_tree(pid).ok());
+                self.diff_trees(parent_tree.as_ref(), &cs.tree)
+            }
+            _ => bail!("not a changeset: {}", cs_id),
+        }
+    }
+
+    /// Flatten a tree into a map of path → blob ObjectId.
+    fn flatten_tree(
+        &self,
+        tree_id: &ObjectId,
+        prefix: String,
+    ) -> Result<BTreeMap<String, ObjectId>> {
+        let mut result = BTreeMap::new();
+        if let Some(Object::Tree(tree)) = self.get_object(tree_id)? {
+            for (name, entry) in &tree.entries {
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", prefix, name)
+                };
+                match entry.kind {
+                    EntryKind::File | EntryKind::Symlink => {
+                        result.insert(path, entry.id);
+                    }
+                    EntryKind::Directory => {
+                        let sub = self.flatten_tree(&entry.id, path)?;
+                        result.extend(sub);
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 
     // ── Internals ───────────────────────────────────────────────────

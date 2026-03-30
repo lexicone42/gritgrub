@@ -7,6 +7,10 @@ pub trait ObjectStore {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>>;
     fn has_object(&self, id: &ObjectId) -> Result<bool>;
     fn find_objects_by_prefix(&self, hex_prefix: &str) -> Result<Vec<(ObjectId, Object)>>;
+    /// List all object IDs in the store (for garbage collection).
+    fn list_all_object_ids(&self) -> Result<Vec<ObjectId>>;
+    /// Delete an object by ID. Returns true if the object existed.
+    fn delete_object(&self, id: &ObjectId) -> Result<bool>;
 }
 
 /// Named reference storage (branches, HEAD, tags).
