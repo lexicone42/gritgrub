@@ -6,7 +6,7 @@ This is a forge-managed project. Use `forge` commands, NOT git.
 
 ```bash
 cargo build --release          # Release binary at target/release/forge
-cargo test                     # All tests (187: unit, property, integration, e2e)
+cargo test                     # All tests (198: unit, property, integration, e2e)
 cargo test -p gritgrub-store --test integration  # Repository integration tests
 cargo test -p gritgrub-cli --test e2e            # CLI + server E2E tests
 cargo test -p gritgrub-core                       # Property + unit tests
@@ -25,6 +25,7 @@ Four crates in a workspace:
 
 - **BLAKE3** for content hashing (parallel, 1GB/s, designed for content addressing)
 - **postcard** for storage serialization (deterministic → reproducible hashes)
+- **BLAKE3 keyed hash** for capability tokens (macaroon-style, zero-lookup auth)
 - **protobuf** for wire format (gRPC interop)
 - **redb** for embedded storage (ACID, single-file, exclusive write lock)
 - **Ed25519** for identity signing (ed25519-dalek)
