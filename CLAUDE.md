@@ -6,7 +6,7 @@ This is a forge-managed project. Use `forge` commands, NOT git.
 
 ```bash
 cargo build --release          # Release binary at target/release/forge
-cargo test                     # All tests (160: unit, property, integration, e2e)
+cargo test                     # All tests (173: unit, property, integration, e2e)
 cargo test -p gritgrub-store --test integration  # Repository integration tests
 cargo test -p gritgrub-cli --test e2e            # CLI + server E2E tests
 cargo test -p gritgrub-core                       # Property + unit tests
