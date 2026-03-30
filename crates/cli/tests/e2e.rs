@@ -657,6 +657,58 @@ fn cli_pipeline_show_no_results() {
     assert!(out.contains("No pipeline results"));
 }
 
+// ── Garbage Collection ──────────────────────────────────────────
+
+#[test]
+fn cli_gc() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("hello.txt"), "world").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    let out = forge_ok(dir.path(), &["gc"]);
+    assert!(out.contains("objects total"));
+    assert!(out.contains("Nothing to clean up") || out.contains("deleted"));
+}
+
+// ── Explore Promote ─────────────────────────────────────────────
+
+#[test]
+fn cli_explore_promote() {
+    let dir = TempDir::new().unwrap();
+    forge_ok(dir.path(), &["init", "--name", "tester"]);
+    fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "initial"]);
+
+    // Create goal.
+    let create_out = forge_ok(dir.path(), &[
+        "explore", "create", "Test promotion",
+    ]);
+    let goal_id = create_out.lines()
+        .find(|l| l.contains("Created exploration goal"))
+        .and_then(|l| l.split_whitespace().last())
+        .unwrap_or("");
+
+    // Create approach.
+    forge_ok(dir.path(), &[
+        "explore", "approach", goal_id, "--name", "winner",
+    ]);
+
+    // Add a file and commit (this advances main, which the approach also points to).
+    fs::write(dir.path().join("feature.rs"), "pub fn feature() {}").unwrap();
+    forge_ok(dir.path(), &["commit", "-m", "add feature"]);
+
+    // Promote — the approach tip is behind main now, but promote should still work
+    // (main has moved forward, approach tip is an ancestor).
+    let promote_out = forge_ok(dir.path(), &[
+        "explore", "promote", goal_id, "--approach", "winner",
+    ]);
+    assert!(
+        promote_out.contains("promoted") || promote_out.contains("Fast-forward") || promote_out.contains("Merge"),
+        "Expected promotion output, got: {}", promote_out
+    );
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 /// Extract changeset ID from commit output like "[main abc123def456] message"

@@ -252,13 +252,32 @@ function renderChangesets(data) {
   if (!data || !data.length) { clearAndAppend('changesets', [el('div', {cls:'empty', text:'No changesets yet'})]); return; }
   clearAndAppend('changesets', data.map(cs => {
     const intent = cs.intent ? badge(cs.intent.kind, cs.intent.kind === 'bugfix' ? 'fail' : 'exploring') : null;
-    return el('div', {style:{padding:'8px 0',borderBottom:'1px solid var(--border)'}}, [
+    const diffContainer = el('div', {style:{display:'none',marginTop:'6px',padding:'8px',background:'var(--bg)',borderRadius:'4px',fontSize:'12px',fontFamily:'var(--mono)'}});
+    const row = el('div', {style:{padding:'8px 0',borderBottom:'1px solid var(--border)',cursor:'pointer'}}, [
       el('span', {style:{fontFamily:'var(--mono)',fontSize:'13px',color:'var(--accent)'}, text:cs.id.slice(0,12)}),
       intent ? el('span', {text:' '}) : null,
       intent,
       el('div', {style:{color:'var(--text-bright)',fontSize:'14px'}, text:cs.message}),
       el('div', {style:{fontSize:'12px',color:'var(--text-dim)'}, text:timeAgo(cs.timestamp)}),
+      diffContainer,
     ].filter(Boolean));
+    row.onclick = async () => {
+      if (diffContainer.style.display !== 'none') {
+        diffContainer.style.display = 'none';
+        return;
+      }
+      diffContainer.replaceChildren(el('span', {style:{color:'var(--text-dim)'}, text:'Loading diff...'}));
+      diffContainer.style.display = 'block';
+      const diff = await fetchJSON('/diff/' + cs.id);
+      if (!diff) { diffContainer.replaceChildren(el('span', {text:'Failed to load diff'})); return; }
+      const lines = [];
+      for (const f of (diff.added||[])) lines.push(el('div', {style:{color:'var(--green)'}, text:'+ ' + f}));
+      for (const f of (diff.modified||[])) lines.push(el('div', {style:{color:'var(--yellow)'}, text:'~ ' + f}));
+      for (const f of (diff.deleted||[])) lines.push(el('div', {style:{color:'var(--red)'}, text:'- ' + f}));
+      if (lines.length === 0) lines.push(el('div', {style:{color:'var(--text-dim)'}, text:'(no file changes)'}));
+      diffContainer.replaceChildren(...lines);
+    };
+    return row;
   }));
 }
 
