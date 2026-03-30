@@ -602,17 +602,16 @@ impl Repository {
         // Store a ref so we can find attestations for this changeset.
         // Uses CAS loop to prevent index collisions under concurrent attestation.
         let short_id = &changeset_id.to_hex()[..16];
-        loop {
+        for _attempt in 0..100 {
             let existing = self.list_attestation_refs(changeset_id)?;
             let index = existing.len();
             let ref_name = format!("refs/attestations/{}/{}", short_id, index);
             if self.backend.cas_ref(&ref_name, None, &Ref::Direct(env_id))? {
-                break;
+                return Ok(env_id);
             }
             // CAS failed — another writer claimed this index. Retry.
         }
-
-        Ok(env_id)
+        bail!("attestation index allocation failed after 100 retries — too much contention");
     }
 
     /// List all attestation envelope IDs for a changeset.
@@ -1407,7 +1406,8 @@ impl Repository {
         // Allocate the next stash index atomically via CAS loop.
         // If two concurrent stash_save() calls pick the same index,
         // cas_ref(expected=None) fails for the loser, who retries.
-        let next_idx = loop {
+        let mut next_idx = 0;
+        for _attempt in 0..100 {
             let stash_refs = self.backend.list_refs("refs/stash/")?;
             let idx = stash_refs.iter()
                 .filter_map(|(name, _)| name.strip_prefix("refs/stash/")?.parse::<usize>().ok())
@@ -1417,10 +1417,11 @@ impl Repository {
 
             let ref_name = format!("refs/stash/{}", idx);
             if self.backend.cas_ref(&ref_name, None, &Ref::Direct(cs_id))? {
-                break idx;
+                next_idx = idx;
+                break;
             }
             // CAS failed — another writer claimed this index. Retry.
-        };
+        }
 
         // Restore working tree to HEAD.
         if let Some(head) = head_id
@@ -1752,7 +1753,11 @@ impl Repository {
     fn approach_depth(&self, tip: &ObjectId) -> Result<usize> {
         let mut count = 0;
         let mut current = Some(*tip);
+        let mut seen = std::collections::HashSet::new();
         while let Some(id) = current {
+            if !seen.insert(id) {
+                break; // Cycle detected — stop counting.
+            }
             count += 1;
             if count > 1000 {
                 break; // Safety limit.
@@ -1802,11 +1807,13 @@ impl Repository {
             Some(target_id) => {
                 // Check if approach is a descendant of target (fast-forward).
                 if self.is_ancestor(&target_id, &approach_tip)? {
-                    self.backend.cas_ref(
+                    if !self.backend.cas_ref(
                         &target_branch,
                         Some(&Ref::Direct(target_id)),
                         &Ref::Direct(approach_tip),
-                    )?;
+                    )? {
+                        bail!("target branch was updated concurrently — retry promotion");
+                    }
                     PromoteResult::FastForward(approach_tip)
                 } else {
                     // Need a merge.
@@ -1858,30 +1865,30 @@ impl Repository {
                     };
 
                     let cs_id = self.put_object(&Object::Changeset(changeset))?;
-                    self.backend.cas_ref(
+                    if !self.backend.cas_ref(
                         &target_branch,
                         Some(&Ref::Direct(target_id)),
                         &Ref::Direct(cs_id),
-                    )?;
+                    )? {
+                        bail!("target branch was updated concurrently — retry promotion");
+                    }
                     PromoteResult::Merged(cs_id)
                 }
             }
         };
 
-        // Mark goal as promoted.
-        let promoted_ref = exploration::refs::goal_promoted(goal_id);
-        self.backend.set_ref(&promoted_ref, &Ref::Direct(approach_tip))?;
-
-        let result_id = match &result {
-            PromoteResult::FastForward(id) | PromoteResult::Merged(id) => id.to_string(),
-            PromoteResult::Conflict(_) => String::new(),
-        };
-        if !result_id.is_empty() {
-            self.emit(EventKind::Promoted {
-                goal_id: goal_id.to_string(),
-                approach: approach_name.to_string(),
-                result_id,
-            }, Some(author));
+        // Only mark as promoted on success (not on conflict).
+        match &result {
+            PromoteResult::FastForward(id) | PromoteResult::Merged(id) => {
+                let promoted_ref = exploration::refs::goal_promoted(goal_id);
+                self.backend.set_ref(&promoted_ref, &Ref::Direct(approach_tip))?;
+                self.emit(EventKind::Promoted {
+                    goal_id: goal_id.to_string(),
+                    approach: approach_name.to_string(),
+                    result_id: id.to_string(),
+                }, Some(author));
+            }
+            PromoteResult::Conflict(_) => {} // Don't mark as promoted.
         }
 
         Ok(result)

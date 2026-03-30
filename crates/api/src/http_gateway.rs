@@ -560,7 +560,8 @@ fn parse_object_id(hex: &str) -> Result<ObjectId, (StatusCode, String)> {
         .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid hex in object ID".into()))?;
-    let arr: [u8; 32] = bytes.try_into().unwrap();
+    let arr: [u8; 32] = bytes.try_into()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid object ID length".into()))?;
     Ok(ObjectId::from_bytes(arr))
 }
 
