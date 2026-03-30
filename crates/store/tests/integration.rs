@@ -1336,3 +1336,157 @@ fn stress_concurrent_event_log() {
     let events = repo.read_events(0, 300).unwrap();
     assert_eq!(events.len(), 240);
 }
+
+// ── Edge Cases & Regression Tests ───────────────────────────────
+
+#[test]
+fn diff_first_commit_no_parent() {
+    let (_dir, repo, id) = fresh_repo();
+    fs::write(_dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(_dir.path().join("b.txt"), "world").unwrap();
+    let cs_id = repo.commit("initial", id, None).unwrap();
+    let diff = repo.diff_changeset(&cs_id).unwrap();
+    assert!(diff.added.contains(&"a.txt".to_string()));
+    assert!(diff.added.contains(&"b.txt".to_string()));
+    assert!(diff.modified.is_empty());
+    assert!(diff.deleted.is_empty());
+}
+
+#[test]
+fn diff_no_changes() {
+    let (_dir, repo, id) = repo_with_commit();
+    let cs_id = repo.commit("no-op", id, None).unwrap();
+    let diff = repo.diff_changeset(&cs_id).unwrap();
+    assert!(diff.added.is_empty());
+    assert!(diff.modified.is_empty());
+    assert!(diff.deleted.is_empty());
+}
+
+#[test]
+fn gc_with_exploration_refs() {
+    let (_dir, repo, id) = repo_with_commit();
+    let goal = make_goal(id);
+    let goal_id = repo.create_goal(&goal).unwrap();
+    repo.create_approach(&goal_id, "keep-me", id).unwrap();
+    let (total, deleted) = repo.gc().unwrap();
+    assert_eq!(deleted, 0, "exploration-reachable objects should not be deleted");
+    assert!(total > 0);
+}
+
+#[test]
+fn pipeline_storage_and_retrieval() {
+    let (_dir, repo, _id) = repo_with_commit();
+    let p = gritgrub_core::Pipeline::default_rust();
+    repo.save_pipeline(&p).unwrap();
+    let loaded = repo.get_pipeline("default").unwrap().unwrap();
+    assert_eq!(loaded.name, "default");
+    assert_eq!(loaded.stages.len(), 3);
+    let all = repo.list_pipelines().unwrap();
+    assert_eq!(all.len(), 1);
+}
+
+#[test]
+fn pipeline_result_attestation_roundtrip() {
+    let (_dir, repo, id) = repo_with_commit();
+    repo.generate_keypair(&id).unwrap();
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+    let result = gritgrub_core::PipelineResult {
+        pipeline: "test-pipeline".into(),
+        changeset: cs_id,
+        stages: vec![gritgrub_core::StageResult {
+            name: "test".into(), passed: true, exit_code: Some(0),
+            duration_ms: 1234, summary: "42 passed".into(),
+            tests_passed: 42, tests_failed: 0, warnings: 0, required: true,
+        }],
+        passed: true, duration_ms: 1234, runner: id, completed_at: 1_000_000,
+    };
+    let env_id = repo.attest_pipeline_result(&result).unwrap();
+    assert!(repo.get_object(&env_id).unwrap().is_some());
+    let results = repo.get_pipeline_results(&cs_id).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].pipeline, "test-pipeline");
+    assert_eq!(results[0].stages[0].tests_passed, 42);
+    assert!(results[0].passed);
+}
+
+#[test]
+fn verification_level_unknown_without_attestations() {
+    let (_dir, repo, _id) = repo_with_commit();
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+    let level = repo.compute_verification_level(&cs_id).unwrap();
+    assert_eq!(level, gritgrub_core::VerificationLevel::Unknown);
+}
+
+#[test]
+fn event_emission_on_commit() {
+    let (dir, repo, id) = repo_with_commit();
+    let seq_before = repo.latest_event_seq().unwrap();
+    fs::write(dir.path().join("trigger.txt"), "data").unwrap();
+    repo.commit("trigger", id, None).unwrap();
+    let seq_after = repo.latest_event_seq().unwrap();
+    assert!(seq_after > seq_before);
+    let events = repo.read_events(seq_before + 1, 10).unwrap();
+    assert!(!events.is_empty());
+    let json = String::from_utf8_lossy(&events[0].1);
+    assert!(json.contains("Commit"), "expected Commit event: {}", json);
+}
+
+#[test]
+fn event_emission_on_goal_create() {
+    let (_dir, repo, id) = repo_with_commit();
+    let seq_before = repo.latest_event_seq().unwrap();
+    let goal = make_goal(id);
+    repo.create_goal(&goal).unwrap();
+    let events = repo.read_events(seq_before + 1, 10).unwrap();
+    let has_goal = events.iter().any(|(_, d)| String::from_utf8_lossy(d).contains("GoalCreated"));
+    assert!(has_goal, "create_goal should emit GoalCreated");
+}
+
+#[test]
+fn multiple_pipelines_stored() {
+    let (_dir, repo, _id) = repo_with_commit();
+    repo.save_pipeline(&gritgrub_core::Pipeline::default_rust()).unwrap();
+    repo.save_pipeline(&gritgrub_core::Pipeline::test_only()).unwrap();
+    let all = repo.list_pipelines().unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn ref_list_range_query_with_many_refs() {
+    let (_dir, repo, _id) = repo_with_commit();
+    let head = repo.resolve_head().unwrap().unwrap();
+    for i in 0..50 {
+        repo.set_ref(&format!("refs/heads/branch-{:03}", i), &Ref::Direct(head)).unwrap();
+    }
+    for i in 0..20 {
+        repo.set_ref(&format!("refs/tags/v{}", i), &Ref::Direct(head)).unwrap();
+    }
+    let branches = repo.list_refs("refs/heads/").unwrap();
+    assert!(branches.len() >= 50);
+    let tags = repo.list_refs("refs/tags/").unwrap();
+    assert_eq!(tags.len(), 20);
+}
+
+#[test]
+fn find_by_short_prefix() {
+    let (_dir, repo, _id) = repo_with_commit();
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+    let hex = cs_id.to_hex();
+    let (found_id, _) = repo.find_by_prefix(&hex[..8]).unwrap();
+    assert_eq!(found_id, cs_id);
+}
+
+#[test]
+fn has_passing_pipeline_check() {
+    let (_dir, repo, id) = repo_with_commit();
+    repo.generate_keypair(&id).unwrap();
+    let cs_id = repo.resolve_head().unwrap().unwrap();
+    assert!(!repo.has_passing_pipeline(&cs_id, "default").unwrap());
+    let result = gritgrub_core::PipelineResult {
+        pipeline: "default".into(), changeset: cs_id, stages: vec![],
+        passed: true, duration_ms: 100, runner: id, completed_at: 1_000_000,
+    };
+    repo.attest_pipeline_result(&result).unwrap();
+    assert!(repo.has_passing_pipeline(&cs_id, "default").unwrap());
+    assert!(!repo.has_passing_pipeline(&cs_id, "other").unwrap());
+}
